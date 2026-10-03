@@ -66,6 +66,25 @@ def fit_copula_correlation(df):
 # ----------------------------------------------------------------------------
 # 2. Monte Carlo sampler
 # ----------------------------------------------------------------------------
+def propagate_shifts(df, corr, shifts):
+    """Expand user-specified shifts to all MC variables via Gaussian conditioning.
+    Listed variables get exactly their shift; the others shift by their
+    expected change given the listed ones, using the copula correlation."""
+
+    if not shifts:
+        return {v: 0.0 for v in MC_VARS}
+    
+    sd = df[MC_VARS].std().to_numpy()
+
+    cov = corr * np.outer(sd, sd)                       # correlation -> covariance
+    S = [MC_VARS.index(v) for v in shifts]              # shifted variable indices
+
+    delta = np.array(list(shifts.values()))
+    full = cov[:, S] @ np.linalg.solve(cov[np.ix_(S, S)], delta)   # Σ_·s Σ_ss⁻¹ Δ_s
+
+    return dict(zip(MC_VARS, full))
+
+
 def sample_mc(df, corr, shifts, n_steps, rng):
     """Draw n_steps rows of the 4 Monte Carlo variables, with scenario shifts."""
     # Correlated normals -> uniforms: this is the copula step
@@ -107,7 +126,8 @@ def run_simulation(df, corr, model, shifts, seed=SEED):
     rng = np.random.default_rng(seed)   # same seed per scenario -> fair comparison
 
     # Monte Carlo draws don't depend on who resigns, so draw every step up front
-    draws = sample_mc(df, corr, shifts, N_STEPS, rng)
+    full_shifts = propagate_shifts(df, corr, shifts)
+    draws = sample_mc(df, corr, full_shifts, N_STEPS, rng)
     mc_values = draws.to_numpy()                      # columns follow MC_VARS
 
     intercept = model.params["const"]
