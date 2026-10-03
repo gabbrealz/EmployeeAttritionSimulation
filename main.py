@@ -31,12 +31,12 @@ INITIAL_STATE = {
     "years_since_promotion": 2.0,
 }
 
-MC_VARS = ["overtime_hours_per_week", "burnout_score",
-           "engagement_score", "manager_support_score"]   # copula variables
-FEATURES = MC_VARS + ["years_since_promotion"]            # regression inputs
+# copula variables
+MC_VARS = ["overtime_hours_per_week", "burnout_score", "engagement_score", "manager_support_score"]
+# regression inputs (copula variables + years_since_promotion)
+FEATURES = MC_VARS + ["years_since_promotion"]
 
 # Bounds applied AFTER the scenario shift (None = no limit on that side).
-# Variables not listed default to the min/max observed in the dataset.
 BOUNDS = {
     "overtime_hours_per_week": (0, None),
     "burnout_score": (0, 10),
@@ -48,8 +48,8 @@ BOUNDS = {
 # Shifts do NOT propagate: shift burnout explicitly if overtime should raise it.
 SCENARIOS = {
     "baseline": {},
-    "heavy overtime": {"overtime_hours_per_week": 3.0, "burnout_score": 1.0},
-    "weak management": {"manager_support_score": -2.0, "engagement_score": -1.0},
+    "heavy overtime": {"overtime_hours_per_week": 3.0},
+    "weak management": {"manager_support_score": -2.0},
 }
 
 
@@ -58,7 +58,7 @@ SCENARIOS = {
 # ----------------------------------------------------------------------------
 def fit_copula_correlation(df):
     """Correlation matrix of the 'normal scores' of each variable's ranks."""
-    u = df[MC_VARS].rank() / (len(df) + 1)     # ranks -> uniform values in (0, 1)
+    u = df[MC_VARS].rank() / (len(df) + 1)     # ranks -> uniform values (between 0 and 1)
     z = norm.ppf(u)                            # uniform -> standard normal scores
     return np.corrcoef(z, rowvar=False)        # 4x4 correlation matrix
 
@@ -84,6 +84,7 @@ def sample_mc(df, corr, shifts, n_steps, rng):
         x = x + shifts.get(var, 0.0)                          # scenario shift
         lo, hi = BOUNDS.get(var, (data.min(), data.max()))    # keep in valid range
         draws[var] = np.clip(x, lo, hi)
+        
     return pd.DataFrame(draws)
 
 
