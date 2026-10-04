@@ -28,8 +28,10 @@ from matplotlib.figure import Figure
 from plots import plot_attrition, plot_predictors, plot_scatter
 from simulation import (
     CSV_PATH, MC_VARS, N_STEPS, SEED, Scenario, default_scenarios, fresh_seed,
-    load_and_fit, run_scenarios,
+    load_and_fit, run_replications, run_scenarios,
 )
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QColor
 
 LABELS = {  # variable -> (display name, spin-box suffix)
     "overtime_hours_per_week": ("Overtime hours", " h/wk"),
@@ -169,6 +171,54 @@ class ScatterWindow(PlotWindow):
         self.canvas.draw_idle()
 
 
+class ReplicationWindow(QWidget):
+    """Standalone window: the n-run comparison, one row per scenario."""
+    COLUMNS = ["Scenario", "Avg. resignations", "± 95% CI", "Avg. attrition prob.",
+               "Reduction vs baseline", "Meets target"]
+
+    def __init__(self, parent=None):
+        super().__init__(parent, Qt.WindowType.Window)
+        self.setWindowTitle("Replication results")
+        self.note = QLabel()
+        self.note.setWordWrap(True)
+        self.table = QTableWidget()
+        self.table.setColumnCount(len(self.COLUMNS))
+        self.table.setHorizontalHeaderLabels(self.COLUMNS)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        lay = QVBoxLayout(self)
+        lay.addWidget(self.note)
+        lay.addWidget(self.table)
+        self.resize(900, 360)
+
+    def show_results(self, table, baseline, n_runs, n_steps, target, seed):
+        self.note.setText(
+            f"{n_runs} runs x {n_steps} months per scenario (seeds {seed} to {seed + n_runs - 1}). "
+            f"Baseline = {baseline}. Reduction = fewer resignations than the baseline "
+            f"(positive = better). Target: at least {target:g}%.")
+        self.table.setRowCount(len(table.index))
+        for r, name in enumerate(table.index):
+            is_base = name == baseline
+            red = table.loc[name, ("employee_attrition", "reduction_%")]
+            meets = (not is_base) and red >= target
+            cells = [
+                name,
+                f"{table.loc[name, ('employee_attrition', 'mean')]:.1f}",
+                f"±{table.loc[name, ('employee_attrition', 'ci95')]:.1f}",
+                f"{table.loc[name, ('avg_attrition_probability', 'mean')]:.4f}",
+                "-" if is_base else f"{red:+.1f}%",
+                "-" if is_base else ("Yes" if meets else "No"),
+            ]
+            for c, text in enumerate(cells):
+                item = QTableWidgetItem(text)
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if meets:
+                    item.setBackground(QColor("#d9ead3"))   # light green = target met
+                self.table.setItem(r, c, item)
+
+
 class ShiftRow:
     """One editor row: [x] name  [spin]. Ticked = pinned to that shift."""
 
@@ -224,6 +274,7 @@ class MainWindow(QMainWindow):
             ScatterWindow(self),
         ]
 
+        self.rep_window = ReplicationWindow(self)
         central = QWidget()
         self.setCentralWidget(central)
         outer = QVBoxLayout(central)
@@ -248,6 +299,7 @@ class MainWindow(QMainWindow):
         self.seed_check.toggled.connect(self.mark_stale)             # a run setting changed
         self.run_btn.clicked.connect(self.on_run_all)
         self.show_graphs_btn.clicked.connect(self.on_show_graphs)
+        self.rep_btn.clicked.connect(self.on_run_replications)
 
         self.update_controls()
         self.set_status("No results yet. Press Run All.")
@@ -300,6 +352,16 @@ class MainWindow(QMainWindow):
             "Unticked: a new random seed is drawn on each Run All (shown in the status line).")
         run_form.addRow("Months", self.steps_spin)
         run_form.addRow(self.seed_check, self.seed_spin)
+        self.runs_spin = QSpinBox()
+        self.runs_spin.setRange(2, 10000)
+        self.runs_spin.setValue(100)
+        self.runs_spin.setSuffix(" runs")
+        self.target_spin = QDoubleSpinBox()
+        self.target_spin.setRange(0, 100)
+        self.target_spin.setValue(10.0)
+        self.target_spin.setSuffix(" %")
+        run_form.addRow("Replications", self.runs_spin)
+        run_form.addRow("Target reduction", self.target_spin)
         lay.addWidget(run_box)
 
         # Run All + Show graphs
@@ -310,6 +372,10 @@ class MainWindow(QMainWindow):
         action_row.addWidget(self.run_btn)
         action_row.addWidget(self.show_graphs_btn)
         lay.addLayout(action_row)
+        self.rep_btn = QPushButton("Run replications")
+        self.rep_btn.setToolTip("Runs every scenario many times and compares each with the "
+                                "FIRST scenario in the list (the baseline).")
+        lay.addWidget(self.rep_btn)
         return col
 
     def _build_editor(self):
@@ -366,6 +432,7 @@ class MainWindow(QMainWindow):
         self.dup_btn.setEnabled(has)
         self.remove_btn.setEnabled(has)
         self.run_btn.setEnabled(self.list.count() > 0)
+        self.rep_btn.setEnabled(self.list.count() > 0)
 
     # --------------------------------------------------------- scenario list
     # Each Scenario object lives INSIDE its list item, so the list and the data
@@ -546,6 +613,27 @@ class MainWindow(QMainWindow):
             self.seed_spin.blockSignals(False)
         self.set_status(f"Up to date: {len(results)} scenario(s){failed}, "
                         f"{n_steps} months, {seed_text}")
+        
+    def on_run_replications(self):
+        scenarios = self.scenarios()
+        if not scenarios:
+            return
+        n_runs, n_steps = self.runs_spin.value(), self.steps_spin.value()
+        target = self.target_spin.value()
+        seed, _ = self.resolve_seed()
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            _, table = run_replications(self.df, self.corr, self.model, scenarios,
+                                        n_runs=n_runs, n_steps=n_steps,
+                                        base_seed=seed, target=target)
+        except Exception as exc:
+            QMessageBox.critical(self, "Replications failed", str(exc))
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.rep_window.show_results(table, scenarios[0].name, n_runs, n_steps, target, seed)
+        self.rep_window.show()
+        self.rep_window.raise_()
 
     # ----------------------------------------------------------------- shutdown
     def closeEvent(self, event):

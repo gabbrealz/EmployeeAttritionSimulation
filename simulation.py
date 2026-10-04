@@ -3,7 +3,7 @@ Employee attrition risk simulation (single agent, replacement-style).
 
 Each iteration (= 1 month):
   1. Gaussian-copula Monte Carlo draws overtime, burnout, engagement, manager support
-  2. years_since_promotion += 1
+  2. years_since_promotion += 1/12
   3. A logistic regression turns the state into P(attrition)
   4. A Bernoulli draw decides if the employee resigns; if so, count it and
      replace them with a new employee at the initial state
@@ -57,6 +57,8 @@ BOUNDS = {
 # copula correlation (see propagate_shifts).
 SCENARIOS = {
     "baseline": {},
+    "reduced overtime": {"overtime_hours_per_week": -3.0},
+    "stronger management": {"manager_support_score": 2.0},
     "heavy overtime": {"overtime_hours_per_week": 3.0},
     "weak management": {"manager_support_score": -2.0},
 }
@@ -66,7 +68,7 @@ SCENARIOS = {
 class SimulationResult:
     """What run_simulation returns (and what the UI consumes)."""
     summary: dict               # the 7 spec outputs + turnover_rate, avg_attrition_probability
-    history: pd.DataFrame       # one row per year, index named "year" (1..n_steps)
+    history: pd.DataFrame       # one row per month, index named "month" (1..n_steps)
     applied_shifts: dict        # full shifts after propagation (all MC variables)
 
 
@@ -159,8 +161,8 @@ def run_simulation(df, corr, model, shifts, n_steps=N_STEPS, seed=SEED):
 
     years = INITIAL_STATE["years_since_promotion"]
     years_log = np.empty(n_steps)
-    p_log = np.empty(n_steps)                         # P(attrition) each year
-    resigned_log = np.zeros(n_steps, dtype=int)       # 1 = resigned that year
+    p_log = np.empty(n_steps)                         # P(attrition) each month
+    resigned_log = np.zeros(n_steps, dtype=int)       # 1 = resigned that month
     employee_attrition = 0
 
     for t in range(n_steps):
@@ -176,12 +178,12 @@ def run_simulation(df, corr, model, shifts, n_steps=N_STEPS, seed=SEED):
             employee_attrition += 1
             years = INITIAL_STATE["years_since_promotion"]   # new employee
 
-    # Per-year history for plotting (index = year 1..n_steps)
+    # Per-month history for plotting (index = month 1..n_steps)
     history = draws.copy()
     history["years_since_promotion"] = years_log
     history["p_attrition"] = p_log
     history["resigned"] = resigned_log
-    history.index = pd.RangeIndex(1, n_steps + 1, name="year")
+    history.index = pd.RangeIndex(1, n_steps + 1, name="month")
 
     # Outputs (averages are over all iterations of the run)
     summary = {
@@ -247,6 +249,55 @@ def run_scenarios(df, corr, model, scenarios, n_steps=N_STEPS, seed=SEED):
 
 
 # ----------------------------------------------------------------------------
+# 6. Replications (many runs per scenario, for the 100-run comparison)
+# ----------------------------------------------------------------------------
+def run_replications(df, corr, model, scenarios, n_runs=100, n_steps=N_STEPS,
+                     base_seed=SEED, baseline=None, target=10.0):
+    """Run every scenario n_runs times and compare each with the baseline.
+
+    Run r uses seed base_seed + r for ALL scenarios (same random draws within a
+    run, different draws between runs), so differences are due to the scenario.
+    baseline = name of the reference scenario (default: the first one).
+
+    Returns (runs, table):
+      runs  = one row per (run, scenario) with the two attrition measures
+      table = one row per scenario: mean, sd, 95% CI of the mean, and the
+              % reduction of the mean versus the baseline."""
+    names = [s.name for s in scenarios]
+    baseline = baseline or names[0]
+
+    rows = []
+    for r in range(n_runs):
+        results, errors = run_scenarios(df, corr, model, scenarios,
+                                        n_steps=n_steps, seed=base_seed + r)
+        if errors:
+            raise ValueError(f"Run {r} failed: {errors}")
+        for name, res in results.items():
+            rows.append({
+                "run": r,
+                "scenario": name,
+                "employee_attrition": res.summary["employee_attrition"],
+                "avg_attrition_probability": res.summary["avg_attrition_probability"],
+            })
+    runs = pd.DataFrame(rows)
+
+    table = {}
+    for metric in ["employee_attrition", "avg_attrition_probability"]:
+        g = runs.groupby("scenario")[metric]
+        mean = g.mean().reindex(names)
+        sd = g.std().reindex(names)
+        table[(metric, "mean")] = mean
+        table[(metric, "sd")] = sd
+        table[(metric, "ci95")] = 1.96 * sd / np.sqrt(n_runs)
+        table[(metric, "reduction_%")] = (1 - mean / mean[baseline]) * 100
+    table = pd.DataFrame(table)
+
+    # Does the scenario meet the target on the main measure?
+    table[("meets_target", f">={target:g}%")] = (
+        table[("employee_attrition", "reduction_%")] >= target)
+    return runs, table
+
+# ----------------------------------------------------------------------------
 # Main: fit everything from the dataset, then run each scenario
 # ----------------------------------------------------------------------------
 if __name__ == "__main__":
@@ -257,3 +308,6 @@ if __name__ == "__main__":
     print(pd.DataFrame({name: r.summary for name, r in results.items()}).T.round(2))
     for name, msg in errors.items():
         print(f"{name}: FAILED ({msg})")
+
+    runs, table = run_replications(df, corr, model, default_scenarios(), n_runs=100)
+    print(table.round(3).to_string())
