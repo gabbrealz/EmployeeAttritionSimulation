@@ -76,16 +76,16 @@ def _shift_cell(var):
 
 METRICS = [
     # attrition
-    ("Resignations",                _summary_cell("employee_attrition", _int)),
-    ("Turnover rate",               _summary_cell("turnover_rate", _pct)),
-    ("Avg attrition probability",   _summary_cell("avg_attrition_probability", _f3)),
-    ("Months simulated",            _summary_cell("time_elapsed", _int)),
+    ("Time elapsed (months)",            _summary_cell("time_elapsed", _int)),
+    ("Employee attrition",               _summary_cell("employee_attrition", _int)),
+    ("Actual turnover rate",                    _summary_cell("turnover_rate", _pct)),
+    ("Avg. attrition probability",       _summary_cell("avg_attrition_probability", _f3)),
     # predictor averages
-    ("Overtime hours per week",     _summary_cell("avg_hours_overtime", _f2)),
-    ("Burnout score",               _summary_cell("avg_employee_burnout", _f2)),
-    ("Engagement score",            _summary_cell("avg_employee_engagement", _f2)),
-    ("Manager support score",       _summary_cell("avg_manager_support", _f2)),
-    ("Years since promotion",       _summary_cell("avg_years_since_promotion", _f2)),
+    ("Avg. overtime hours per week",     _summary_cell("avg_hours_overtime", _f2)),
+    ("Avg. burnout score",               _summary_cell("avg_employee_burnout", _f2)),
+    ("Avg. engagement score",            _summary_cell("avg_employee_engagement", _f2)),
+    ("Avg. manager support score",       _summary_cell("avg_manager_support", _f2)),
+    ("Avg. years since promotion",       _summary_cell("avg_years_since_promotion", _f2)),
 ] + [
     # effective shifts (after correlation propagation)
     (f"Shift: {LABELS[var][0].lower()}", _shift_cell(var)) for var in MC_VARS
@@ -329,12 +329,6 @@ class MainWindow(QMainWindow):
             form.addRow(row.check, row.spin)
 
         lay.addLayout(form)
-
-        note = QLabel("Ticked = pinned to exactly this shift.\n"
-                      "Unticked = follows the correlations (see the 'Shift' rows "
-                      "of the results table).")
-        note.setWordWrap(True)
-        lay.addWidget(note)
         lay.addStretch()
         return self.editor_box
 
