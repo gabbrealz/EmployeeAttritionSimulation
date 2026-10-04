@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (
     QLabel, QPushButton, QMessageBox,
 )
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
-from matplotlib.figure import Figure          # never matplotlib.pyplot (see plan, section 6)
+from matplotlib.figure import Figure
 
 from plots import plot_attrition, plot_predictors
 from simulation import (
@@ -30,10 +30,10 @@ from simulation import (
 CUSTOM = "Custom"
 
 LABELS = {  # variable -> (display name, spin-box suffix)
-    "overtime_hours_per_week": ("Overtime", " h/wk"),
-    "burnout_score": ("Burnout", " pts"),
-    "engagement_score": ("Engagement", " pts"),
-    "manager_support_score": ("Manager support", " pts"),
+    "overtime_hours_per_week": ("Overtime Hours", " h/wk"),
+    "burnout_score": ("Burnout Score", " pts"),
+    "engagement_score": ("Engagement Score", " pts"),
+    "manager_support_score": ("Manager Support Score", " pts"),
 }
 
 SHIFT_TOOLTIP = (
@@ -58,16 +58,16 @@ def _signed(v):
 
 # (row label, key in result.summary, formatter)
 PREDICTOR_OUTPUTS = [
-    ("Overtime (h/week)", "avg_hours_overtime", _f2),
-    ("Burnout", "avg_employee_burnout", _f2),
-    ("Engagement", "avg_employee_engagement", _f2),
-    ("Manager support", "avg_manager_support", _f2),
-    ("Years since promotion", "avg_years_since_promotion", _f2),
+    ("Overtime Hours (h/week)", "avg_hours_overtime", _f2),
+    ("Burnout Score", "avg_employee_burnout", _f2),
+    ("Engagement Score", "avg_employee_engagement", _f2),
+    ("Manager support Score", "avg_manager_support", _f2),
+    ("Years Since Promotion", "avg_years_since_promotion", _f2),
 ]
 ATTRITION_OUTPUTS = [
-    ("Resignations", "employee_attrition", _int),
+    ("Attrition", "employee_attrition", _int),
     ("Turnover rate", "turnover_rate", _pct),
-    ("Avg P(attrition)", "avg_attrition_probability", _f3),
+    ("Avg Attrition Probability", "avg_attrition_probability", _f3),
     ("Years simulated", "time_elapsed", _int),
 ]
 
