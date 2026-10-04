@@ -78,7 +78,6 @@ def _shift_cell(var):
 
 METRICS = [
     # attrition
-    ("Time elapsed (months)",            _summary_cell("time_elapsed", _int)),
     ("Employee attrition",               _summary_cell("employee_attrition", _int)),
     ("Actual turnover rate",             _summary_cell("turnover_rate", _pct)),
     ("Avg. attrition probability",       _summary_cell("avg_attrition_probability", _f3)),
@@ -88,6 +87,7 @@ METRICS = [
     ("Avg. engagement score",            _summary_cell("avg_employee_engagement", _f2)),
     ("Avg. manager support score",       _summary_cell("avg_manager_support", _f2)),
     ("Avg. years since promotion",       _summary_cell("avg_years_since_promotion", _f2)),
+    ("Time elapsed (months)",            _summary_cell("time_elapsed", _int)),
 ] + [
     # effective shifts (after correlation propagation)
     (f"Shift: {LABELS[var][0].lower()}", _shift_cell(var)) for var in MC_VARS
