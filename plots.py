@@ -11,7 +11,13 @@ predictors, p_attrition, resigned). Insertion order = legend order.
   * one scenario: thin raw line + rolling mean, as a single-scenario detail view
 
 Each scenario gets the same color in every figure (by its position in `histories`).
+
+plot_scatter is different: it shows ONE scenario (chosen by name) as four scatterplots of
+the simulated states, with resignation months highlighted. There color means
+resigned / stayed, not scenario.
 """
+from matplotlib.lines import Line2D
+
 from simulation import BOUNDS
 
 PREDICTORS = [  # (column, axis label)
@@ -25,6 +31,17 @@ PREDICTORS = [  # (column, axis label)
 # Y labels are rotated and the 5 stacked axes are short, so keep them small and
 # (where long) two-line; otherwise neighbouring labels overlap.
 LABEL_SIZE = 8
+
+SCATTER_PAIRS = [  # (x column, y column), in subplot order: row by row
+    ("overtime_hours_per_week", "burnout_score"),
+    ("manager_support_score",   "engagement_score"),
+    ("burnout_score",           "engagement_score"),
+    ("overtime_hours_per_week", "manager_support_score"),
+]
+# column -> one-line axis label (the predictor plot's labels are two-line; scatter axes are roomy)
+LABEL = {col: label.replace("\n", " ") for col, label in PREDICTORS}
+STAYED_COLOR, RESIGNED_COLOR = "0.55", "crimson"   # gray vs red: avoids the first scenario colors
+MAX_STAYED = 5000                   # display cap on "stayed" points (resignations are never thinned)
 
 RAW_STYLE = dict(lw=0.6, alpha=0.35)       # thin, faint: the per-month noise
 SMOOTH_STYLE = dict(lw=1)                # thick: the trend
@@ -55,15 +72,14 @@ def plot_predictors(fig, histories):
 
     for ax, (col, label) in zip(axes, PREDICTORS):
         for name, h in histories.items():
-            if single:
+            if col == "years_since_promotion":
+                # Always plot raw line only (never smoothed)
+                ax.plot(h.index, h[col], color=colors[name], label=name, **SMOOTH_STYLE)
+            elif single:
+                # If there's one scenario only, plot the raw line
                 ax.plot(h.index, h[col], color=colors[name], **RAW_STYLE)
-            # years_since_promotion for ONE scenario: raw only. The sawtooth
-            # (+1/year, reset after a resignation) is the signal there. With
-            # several scenarios the rolling mean is drawn instead: a scenario
-            # with more resignations shows a lower average.
-            if not (single and col == "years_since_promotion"):
-                ax.plot(h.index, _smooth(h[col], len(h)), color=colors[name],
-                        label=name, **SMOOTH_STYLE)
+            else:
+                ax.plot(h.index, _smooth(h[col], len(h)), color=colors[name], label=name, **SMOOTH_STYLE)
 
         # Fixed y-limits (from BOUNDS) so runs stay visually comparable;
         # None = leave that side on autoscale (overtime top, years top).
@@ -115,3 +131,51 @@ def plot_attrition(fig, histories):
     ax_p.grid(True, alpha=0.25)
 
     fig.suptitle(f"Attrition ({len(histories)} scenario/s)")
+
+
+def _axis_limits(col, histories):
+    """Same limits for every scenario, so switching scenarios shows the cloud MOVING
+    instead of the axes rescaling: BOUNDS where defined, else the data range across ALL
+    scenarios. A small pad keeps points clipped at a bound visible."""
+    lo, hi = BOUNDS.get(col, (None, None))
+    if lo is None:
+        lo = min(h[col].min() for h in histories.values())
+    if hi is None:
+        hi = max(h[col].max() for h in histories.values())
+    pad = 0.03 * ((hi - lo) or 1.0)
+    return lo - pad, hi + pad
+
+
+def plot_scatter(fig, name, histories):
+    """2x2 scatterplots of the simulated states of ONE scenario. Each point = one month.
+    Stayed = small, faint gray; resigned = larger, opaque red, drawn last (on top)."""
+    fig.clear()
+    if name not in histories:
+        return
+    h = histories[name]
+    resigned = h["resigned"] == 1
+    left, stayed = h[resigned], h[~resigned]
+    n_left, n_stayed = len(left), len(stayed)                # true counts, for the legend
+    if n_stayed > MAX_STAYED:
+        stayed = stayed.sample(MAX_STAYED, random_state=0)   # display only; all resignations kept
+
+    axes = fig.subplots(2, 2).ravel()                        # row-major = order of SCATTER_PAIRS
+    for ax, (xc, yc) in zip(axes, SCATTER_PAIRS):
+        ax.scatter(stayed[xc], stayed[yc], s=10, color=STAYED_COLOR, alpha=0.6, linewidths=0)
+        ax.scatter(left[xc], left[yc], s=20, color=RESIGNED_COLOR, alpha=0.85, linewidths=0)  # last = on top
+        ax.set_xlabel(LABEL[xc])
+        ax.set_ylabel(LABEL[yc])
+        ax.set_xlim(*_axis_limits(xc, histories))
+        ax.set_ylim(*_axis_limits(yc, histories))
+        ax.grid(True, alpha=0.25)
+
+    # Proxy handles, so the "stayed" legend dot isn't invisibly faint
+    handles = [
+        Line2D([], [], marker="o", ls="", color=STAYED_COLOR, alpha=0.6, label=f"Stayed ({n_stayed})"),
+        Line2D([], [], marker="o", ls="", color=RESIGNED_COLOR, label=f"Resigned ({n_left})"),
+    ]
+    try:
+        fig.legend(handles=handles, loc="outside lower center", ncol=2)
+    except ValueError:                                       # matplotlib < 3.7 has no "outside" locations
+        axes[0].legend(handles=handles, loc="best")
+    fig.suptitle(f"{name}: {n_left} resignations in {len(h)} months")

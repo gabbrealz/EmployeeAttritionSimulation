@@ -214,6 +214,11 @@ def default_scenarios():
     return [Scenario(name, dict(shifts)) for name, shifts in SCENARIOS.items()]
 
 
+def fresh_seed():
+    """A new random seed that fits in a QSpinBox (31 bits), so it can be shown and typed back."""
+    return int(np.random.default_rng().integers(0, 2**31 - 1))
+
+
 def run_scenarios(df, corr, model, scenarios, n_steps=N_STEPS, seed=SEED):
     """Run every scenario with the same months and seed.
 
@@ -221,11 +226,16 @@ def run_scenarios(df, corr, model, scenarios, n_steps=N_STEPS, seed=SEED):
     underlying random draws (common random numbers): differences between them
     are due to the scenario, and results do not depend on scenario order.
 
+    seed=None draws one fresh random seed for the whole batch, so the shared-draws
+    guarantee also holds for unseeded runs.
+
     Returns (results, errors): name -> SimulationResult, and name -> message
     for scenarios that failed. One failure does not stop the others."""
     names = [s.name for s in scenarios]
     if len(set(names)) != len(names):
         raise ValueError("Scenario names must be unique")
+    if seed is None:
+        seed = fresh_seed()      # ONE seed for the whole batch, not one per scenario
     results, errors = {}, {}
     for sc in scenarios:
         try:

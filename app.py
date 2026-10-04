@@ -18,15 +18,18 @@ import sys
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
-    QGroupBox, QFormLayout, QCheckBox, QDoubleSpinBox, QSpinBox, QLabel,
+    QGroupBox, QFormLayout, QCheckBox, QDoubleSpinBox, QSpinBox, QLabel, QComboBox,
     QPushButton, QMessageBox, QListWidget, QListWidgetItem, QLineEdit,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
 )
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 
-from plots import plot_attrition, plot_predictors
-from simulation import CSV_PATH, MC_VARS, N_STEPS, SEED, Scenario, default_scenarios, load_and_fit, run_scenarios
+from plots import plot_attrition, plot_predictors, plot_scatter
+from simulation import (
+    CSV_PATH, MC_VARS, N_STEPS, SEED, Scenario, default_scenarios, fresh_seed,
+    load_and_fit, run_scenarios,
+)
 
 LABELS = {  # variable -> (display name, spin-box suffix)
     "overtime_hours_per_week": ("Overtime hours", " h/wk"),
@@ -110,19 +113,60 @@ class MplCanvas(FigureCanvasQTAgg):
 
 class PlotWindow(QWidget):
     """A standalone top-level window holding one canvas and its toolbar.
-    Closing it only hides it: the object lives on, so it can be redrawn and
-    shown again at any time."""
+    It owns its plot function and exposes update_plot(histories), so the main
+    window treats every figure window the same way. Closing it only hides it:
+    the object lives on, so it can be redrawn and shown again at any time."""
 
-    def __init__(self, title, parent=None):
+    def __init__(self, title, plot_fn, parent=None):
         # Qt.WindowType.Window makes this a separate top-level window, while
         # `parent` keeps it owned by (and closed with) the main window.
         super().__init__(parent, Qt.WindowType.Window)
         self.setWindowTitle(title)
+        self.plot_fn = plot_fn
         self.canvas = MplCanvas()
         lay = QVBoxLayout(self)
         lay.addWidget(NavigationToolbar2QT(self.canvas, self))
         lay.addWidget(self.canvas)
         self.resize(900, 700)
+
+    def update_plot(self, histories):
+        self.plot_fn(self.canvas.fig, histories)
+        self.canvas.draw_idle()
+
+
+class ScatterWindow(PlotWindow):
+    """Four scatterplots of ONE scenario at a time, chosen in a combo box.
+    (Color marks resigned vs stayed here, so scenarios cannot also be color-coded.)
+    Switching scenario redraws from the stored histories; it does not re-run."""
+
+    def __init__(self, parent=None):
+        super().__init__("Attrition scatterplots", plot_scatter, parent)
+        self.histories = {}
+        self.combo = QComboBox()
+        bar = QHBoxLayout()
+        bar.addWidget(QLabel("Scenario:"))
+        bar.addWidget(self.combo, 1)
+        self.layout().insertLayout(0, bar)           # above the matplotlib toolbar
+        self.combo.currentTextChanged.connect(self._draw)
+        self.resize(1000, 800)
+
+    def update_plot(self, histories):                # called after every Run All
+        self.histories = histories
+        previous = self.combo.currentText()
+        self.combo.blockSignals(True)                # clear()/addItems() must not trigger redraws
+        self.combo.clear()
+        self.combo.addItems(list(histories))
+        if previous in histories:
+            self.combo.setCurrentText(previous)      # keep the user's choice across runs
+        self.combo.blockSignals(False)
+        self._draw()
+
+    def _draw(self, *_):
+        name = self.combo.currentText()
+        if name not in self.histories:
+            return
+        self.plot_fn(self.canvas.fig, name, self.histories)
+        self.canvas.draw_idle()
 
 
 class ShiftRow:
@@ -172,12 +216,13 @@ class MainWindow(QMainWindow):
         self._loading = False        # True while the editor is being filled programmatically
         self._plots_placed = False
 
-        # The two graph windows: created now, hidden until the first run. Parented
+        # The three graph windows: created now, hidden until the first run. Parented
         # to this window (so they are kept alive and closed with it).
-        self.plot_windows = {
-            "predictors": (PlotWindow("Predictor variables", self), plot_predictors),
-            "attrition":  (PlotWindow("Attrition", self), plot_attrition),
-        }
+        self.plot_windows = [
+            PlotWindow("Predictor variables", plot_predictors, self),
+            PlotWindow("Attrition", plot_attrition, self),
+            ScatterWindow(self),
+        ]
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -199,6 +244,8 @@ class MainWindow(QMainWindow):
         self.remove_btn.clicked.connect(self.on_remove)
         self.steps_spin.valueChanged.connect(self.mark_stale)
         self.seed_spin.valueChanged.connect(self.mark_stale)
+        self.seed_check.toggled.connect(self.seed_spin.setEnabled)   # box only active when ticked
+        self.seed_check.toggled.connect(self.mark_stale)             # a run setting changed
         self.run_btn.clicked.connect(self.on_run_all)
         self.show_graphs_btn.clicked.connect(self.on_show_graphs)
 
@@ -243,10 +290,16 @@ class MainWindow(QMainWindow):
         self.steps_spin.setValue(N_STEPS)
         self.steps_spin.setSuffix(" months")
         self.seed_spin = QSpinBox()
-        self.seed_spin.setRange(0, 2147483647)    # largest value a QSpinBox holds
+        self.seed_spin.setRange(0, 2**31 - 1)     # QSpinBox defaults to 0..99; 2**31-1 is its maximum
         self.seed_spin.setValue(SEED)
+        self.seed_check = QCheckBox("Fixed seed")
+        self.seed_check.setChecked(True)          # default = reproducible, as before
+        self.seed_spin.setEnabled(self.seed_check.isChecked())
+        self.seed_check.setToolTip(
+            "Ticked: every run uses this seed, so results are reproducible.\n"
+            "Unticked: a new random seed is drawn on each Run All (shown in the status line).")
         run_form.addRow("Months", self.steps_spin)
-        run_form.addRow("Seed", self.seed_spin)
+        run_form.addRow(self.seed_check, self.seed_spin)
         lay.addWidget(run_box)
 
         # Run All + Show graphs
@@ -438,31 +491,40 @@ class MainWindow(QMainWindow):
         if self._plots_placed:
             return
         self._plots_placed = True
-        for i, (win, _) in enumerate(self.plot_windows.values()):
+        for i, win in enumerate(self.plot_windows):
             win.move(self.x() + 60 + 40 * i, self.y() + 60 + 40 * i)
 
     def draw_graphs(self, histories):
         self._place_plot_windows()
-        for win, plot_fn in self.plot_windows.values():
-            plot_fn(win.canvas.fig, histories)
-            win.canvas.draw_idle()
+        for win in self.plot_windows:
+            win.update_plot(histories)
             if not win.isVisible():
                 win.show()
                 win.raise_()
 
     def on_show_graphs(self):
         """Reopen windows the user closed, without re-running."""
-        for win, _ in self.plot_windows.values():
+        for win in self.plot_windows:
             win.show()
             win.raise_()
 
     # ---------------------------------------------------------------------- run
+    def resolve_seed(self):
+        """Return (seed, text for the status line) for this run. Unseeded = ONE fresh
+        seed shared by all scenarios (so they still see the same random draws)."""
+        if self.seed_check.isChecked():
+            seed = self.seed_spin.value()
+            return seed, f"seed {seed} (fixed)"
+        seed = fresh_seed()
+        return seed, f"seed {seed} (random)"
+
     def on_run_all(self):
         scenarios = self.scenarios()
         if not scenarios:
             return
         pinned = {sc.name: dict(sc.shifts) for sc in scenarios}   # snapshot taken at run time
-        n_steps, seed = self.steps_spin.value(), self.seed_spin.value()
+        n_steps = self.steps_spin.value()
+        seed, seed_text = self.resolve_seed()
         try:
             results, errors = run_scenarios(self.df, self.corr, self.model, scenarios,
                                             n_steps=n_steps, seed=seed)
@@ -481,12 +543,19 @@ class MainWindow(QMainWindow):
         self.draw_graphs({name: r.history for name, r in results.items()})
         self.show_graphs_btn.setEnabled(True)
         failed = f", {len(errors)} failed" if errors else ""
+        if not self.seed_check.isChecked():
+            # Show the random seed in the (disabled) box: ticking "Fixed seed" afterwards
+            # reproduces this exact run. Signals blocked, else valueChanged would mark the
+            # results we just produced as out of date.
+            self.seed_spin.blockSignals(True)
+            self.seed_spin.setValue(seed)
+            self.seed_spin.blockSignals(False)
         self.set_status(f"Up to date: {len(results)} scenario(s){failed}, "
-                        f"{n_steps} months, seed {seed}")
+                        f"{n_steps} months, {seed_text}")
 
     # ----------------------------------------------------------------- shutdown
     def closeEvent(self, event):
-        for win, _ in self.plot_windows.values():
+        for win in self.plot_windows:
             win.close()
         super().closeEvent(event)
 
