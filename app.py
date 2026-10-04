@@ -78,7 +78,7 @@ METRICS = [
     # attrition
     ("Time elapsed (months)",            _summary_cell("time_elapsed", _int)),
     ("Employee attrition",               _summary_cell("employee_attrition", _int)),
-    ("Actual turnover rate",                    _summary_cell("turnover_rate", _pct)),
+    ("Actual turnover rate",             _summary_cell("turnover_rate", _pct)),
     ("Avg. attrition probability",       _summary_cell("avg_attrition_probability", _f3)),
     # predictor averages
     ("Avg. overtime hours per week",     _summary_cell("avg_hours_overtime", _f2)),
