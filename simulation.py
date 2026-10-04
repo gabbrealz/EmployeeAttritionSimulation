@@ -9,8 +9,9 @@ Each iteration (= 1 year):
      replace them with a new employee at the initial state
 
 This module has no GUI code: app.py (PyQt6) and plots.py (matplotlib) build on it.
+run_scenarios() runs a list of Scenario objects with a shared years/seed.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -163,7 +164,7 @@ def run_simulation(df, corr, model, shifts, n_steps=N_STEPS, seed=SEED):
     employee_attrition = 0
 
     for t in range(n_steps):
-        years += 1                                    # deterministic update
+        years += 1/12                                 # deterministic update
         years_log[t] = years                          # state the model sees
 
         x = np.append(mc_values[t], years)            # full state, FEATURES order
@@ -199,12 +200,50 @@ def run_simulation(df, corr, model, shifts, n_steps=N_STEPS, seed=SEED):
 
 
 # ----------------------------------------------------------------------------
+# 5. Scenario layer (several scenarios, one shared years/seed)
+# ----------------------------------------------------------------------------
+@dataclass
+class Scenario:
+    name: str
+    shifts: dict = field(default_factory=dict)   # variable -> shift; only PINNED variables appear
+
+
+def default_scenarios():
+    """Fresh, independent copies of the presets, so the UI can edit them
+    without ever modifying the module-level SCENARIOS dict."""
+    return [Scenario(name, dict(shifts)) for name, shifts in SCENARIOS.items()]
+
+
+def run_scenarios(df, corr, model, scenarios, n_steps=N_STEPS, seed=SEED):
+    """Run every scenario with the same years and seed.
+
+    Each run_simulation call seeds its own RNG, so all scenarios see the same
+    underlying random draws (common random numbers): differences between them
+    are due to the scenario, and results do not depend on scenario order.
+
+    Returns (results, errors): name -> SimulationResult, and name -> message
+    for scenarios that failed. One failure does not stop the others."""
+    names = [s.name for s in scenarios]
+    if len(set(names)) != len(names):
+        raise ValueError("Scenario names must be unique")
+    results, errors = {}, {}
+    for sc in scenarios:
+        try:
+            results[sc.name] = run_simulation(df, corr, model, sc.shifts,
+                                              n_steps=n_steps, seed=seed)
+        except (ValueError, np.linalg.LinAlgError) as exc:
+            errors[sc.name] = str(exc)
+    return results, errors
+
+
+# ----------------------------------------------------------------------------
 # Main: fit everything from the dataset, then run each scenario
 # ----------------------------------------------------------------------------
 if __name__ == "__main__":
     df, corr, model = load_and_fit()
     print(model.summary(), "\n")
 
-    results = {name: run_simulation(df, corr, model, shifts).summary
-               for name, shifts in SCENARIOS.items()}
-    print(pd.DataFrame(results).T.round(2))
+    results, errors = run_scenarios(df, corr, model, default_scenarios())
+    print(pd.DataFrame({name: r.summary for name, r in results.items()}).T.round(2))
+    for name, msg in errors.items():
+        print(f"{name}: FAILED ({msg})")

@@ -1,39 +1,41 @@
 """
-PyQt6 front-end for the employee attrition simulation.
+PyQt6 front-end for the employee attrition simulation: multi-scenario manager.
 
     python app.py
 
-Layout: scenario controls + Run button on the left; the predictor graph, the
-attrition graph and the numeric outputs on the right. This file contains no
-statistics: all maths lives in simulation.py, all drawing in plots.py.
+Main window: a scenario list (add / duplicate / remove), an editor for the
+selected scenario, shared run settings (months, seed) and a results table with
+one column per scenario. "Run All" simulates every scenario with the same
+months and seed; the graphs open in two separate windows (predictors,
+attrition), each overlaying all scenarios.
+
+This file contains no statistics: all maths lives in simulation.py, all
+drawing in plots.py.
 """
 import sys
 
-import numpy as np
-
 # Import PyQt6 BEFORE the matplotlib Qt backend so matplotlib picks this binding.
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QFontDatabase
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
-    QGroupBox, QFormLayout, QComboBox, QCheckBox, QDoubleSpinBox, QSpinBox,
-    QLabel, QPushButton, QMessageBox,
+    QGroupBox, QFormLayout, QCheckBox, QDoubleSpinBox, QSpinBox, QLabel,
+    QPushButton, QMessageBox, QListWidget, QListWidgetItem, QLineEdit,
+    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
 )
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
-from matplotlib.figure import Figure
+from matplotlib.figure import Figure          # never matplotlib.pyplot
 
 from plots import plot_attrition, plot_predictors
 from simulation import (
-    CSV_PATH, MC_VARS, N_STEPS, SCENARIOS, SEED, load_and_fit, run_simulation,
+    CSV_PATH, MC_VARS, N_STEPS, SEED, Scenario, default_scenarios,
+    load_and_fit, run_scenarios,
 )
 
-CUSTOM = "Custom"
-
 LABELS = {  # variable -> (display name, spin-box suffix)
-    "overtime_hours_per_week": ("Overtime Hours", " h/wk"),
-    "burnout_score": ("Burnout Score", " pts"),
-    "engagement_score": ("Engagement Score", " pts"),
-    "manager_support_score": ("Manager Support Score", " pts"),
+    "overtime_hours_per_week": ("Overtime", " h/wk"),
+    "burnout_score": ("Burnout", " pts"),
+    "engagement_score": ("Engagement", " pts"),
+    "manager_support_score": ("Manager support", " pts"),
 }
 
 SHIFT_TOOLTIP = (
@@ -42,8 +44,10 @@ SHIFT_TOOLTIP = (
     "dataset's correlations."
 )
 
+STALE_TEXT = "Out of date: scenarios or settings changed since the last run. Press Run All."
 
-# --- value formatters for the outputs panel ---------------------------------
+
+# --- value formatters --------------------------------------------------------
 def _f2(v):  return f"{v:.2f}"
 def _f3(v):  return f"{v:.3f}"
 def _pct(v): return f"{v:.1%}"
@@ -56,22 +60,49 @@ def _signed(v):
     return "+0.00" if s == "-0.00" else s
 
 
-# (row label, key in result.summary, formatter)
-PREDICTOR_OUTPUTS = [
-    ("Overtime Hours (h/week)", "avg_hours_overtime", _f2),
-    ("Burnout Score", "avg_employee_burnout", _f2),
-    ("Engagement Score", "avg_employee_engagement", _f2),
-    ("Manager support Score", "avg_manager_support", _f2),
-    ("Years Since Promotion", "avg_years_since_promotion", _f2),
-]
-ATTRITION_OUTPUTS = [
-    ("Attrition", "employee_attrition", _int),
-    ("Turnover rate", "turnover_rate", _pct),
-    ("Avg Attrition Probability", "avg_attrition_probability", _f3),
-    ("Years simulated", "time_elapsed", _int),
+# --- results table rows ------------------------------------------------------
+# Each row = (label, function (result, pinned) -> text). `pinned` is the
+# scenario's shifts dict as it was when the run started (for the set/auto tag).
+def _summary_cell(key, fmt):
+    return lambda r, pinned: fmt(r.summary[key])
+
+
+def _shift_cell(var):
+    def fmt(r, pinned):
+        tag = "set" if var in pinned else "auto"      # set = pinned, auto = via correlations
+        return f"{_signed(r.applied_shifts[var])} ({tag})"
+    return fmt
+
+
+METRICS = [
+    # attrition
+    ("Resignations",          _summary_cell("employee_attrition", _int)),
+    ("Turnover rate",         _summary_cell("turnover_rate", _pct)),
+    ("Avg P(attrition)",      _summary_cell("avg_attrition_probability", _f3)),
+    ("Months simulated",       _summary_cell("time_elapsed", _int)),
+    # predictor averages
+    ("Overtime (h/week)",     _summary_cell("avg_hours_overtime", _f2)),
+    ("Burnout",               _summary_cell("avg_employee_burnout", _f2)),
+    ("Engagement",            _summary_cell("avg_employee_engagement", _f2)),
+    ("Manager support",       _summary_cell("avg_manager_support", _f2)),
+    ("Years since promotion", _summary_cell("avg_years_since_promotion", _f2)),
+] + [
+    # effective shifts (after correlation propagation)
+    (f"Shift: {LABELS[var][0].lower()}", _shift_cell(var)) for var in MC_VARS
 ]
 
 
+def unique_name(base, existing):
+    """base, or 'base (2)', 'base (3)', ... so that it is not in `existing`."""
+    if base not in existing:
+        return base
+    i = 2
+    while f"{base} ({i})" in existing:
+        i += 1
+    return f"{base} ({i})"
+
+
+# --- widgets -----------------------------------------------------------------
 class MplCanvas(FigureCanvasQTAgg):
     """A matplotlib canvas that owns a plain Figure (no pyplot global state)."""
 
@@ -80,17 +111,25 @@ class MplCanvas(FigureCanvasQTAgg):
         super().__init__(self.fig)
 
 
-def make_plot_panel(title, canvas, parent):
-    """Titled group box holding matplotlib's toolbar (zoom, pan, save PNG) + the canvas."""
-    box = QGroupBox(title)
-    lay = QVBoxLayout(box)
-    lay.addWidget(NavigationToolbar2QT(canvas, parent))
-    lay.addWidget(canvas)
-    return box
+class PlotWindow(QWidget):
+    """A standalone top-level window holding one canvas and its toolbar.
+    Closing it only hides it: the object lives on, so it can be redrawn and
+    shown again at any time."""
+
+    def __init__(self, title, parent=None):
+        # Qt.WindowType.Window makes this a separate top-level window, while
+        # `parent` keeps it owned by (and closed with) the main window.
+        super().__init__(parent, Qt.WindowType.Window)
+        self.setWindowTitle(title)
+        self.canvas = MplCanvas()
+        lay = QVBoxLayout(self)
+        lay.addWidget(NavigationToolbar2QT(self.canvas, self))
+        lay.addWidget(self.canvas)
+        self.resize(900, 700)
 
 
 class ShiftRow:
-    """One scenario row: [x] name  [spin]. Ticked = pinned to that shift."""
+    """One editor row: [x] name  [spin]. Ticked = pinned to that shift."""
 
     def __init__(self, name, suffix, span, on_edit):
         self.check = QCheckBox(name)
@@ -101,6 +140,7 @@ class ShiftRow:
         self.spin.setSingleStep(0.5)
         self.spin.setDecimals(2)
         self.spin.setSuffix(suffix)
+        self.spin.setMaximumWidth(140)
         self.spin.setEnabled(False)               # disabled until ticked
         self.spin.setToolTip(SHIFT_TOOLTIP)
 
@@ -127,178 +167,344 @@ class MainWindow(QMainWindow):
     def __init__(self, df, corr, model):
         super().__init__()
         self.df, self.corr, self.model = df, corr, model
-        self.setWindowTitle("Employee attrition simulation")
+        self.setWindowTitle("Employee attrition simulation - scenarios")
 
-        self.rows = {}            # variable -> ShiftRow
-        self.value_labels = {}    # summary key -> (QLabel, formatter)
-        self.pred_canvas = MplCanvas()
-        self.attr_canvas = MplCanvas()
+        self.rows = {}               # variable -> ShiftRow (the editor)
+        self.last_results = None     # name -> SimulationResult of the last run
+        self.last_shifts = None      # name -> pinned shifts as they were at that run
+        self._loading = False        # True while the editor is being filled programmatically
+        self._plots_placed = False
+
+        # The two graph windows: created now, hidden until the first run. Parented
+        # to this window (so they are kept alive and closed with it).
+        self.plot_windows = {
+            "predictors": (PlotWindow("Predictor variables", self), plot_predictors),
+            "attrition":  (PlotWindow("Attrition", self), plot_attrition),
+        }
 
         central = QWidget()
         self.setCentralWidget(central)
-        root = QHBoxLayout(central)
-        root.addWidget(self._build_left_panel())
-        root.addWidget(self._build_right_panel(), stretch=1)
+        outer = QVBoxLayout(central)
+        split = QSplitter(Qt.Orientation.Vertical)
+        split.addWidget(self._build_top())
+        split.addWidget(self._build_results())
+        split.setChildrenCollapsible(False)
+        split.setStretchFactor(0, 1)
+        split.setStretchFactor(1, 2)
+        split.setSizes([320, 430])
+        outer.addWidget(split)
 
-        # Connect once, here. (Signals are connected after all widgets exist.)
-        self.preset_combo.currentTextChanged.connect(self.on_preset_changed)
-        self.run_btn.clicked.connect(self.on_run)
-        self.statusBar().showMessage("Ready")
+        # Connect once, here, after every widget exists.
+        self.list.currentItemChanged.connect(self.on_selection_changed)
+        self.name_edit.editingFinished.connect(self.on_name_edited)
+        self.add_btn.clicked.connect(self.on_add)
+        self.dup_btn.clicked.connect(self.on_duplicate)
+        self.remove_btn.clicked.connect(self.on_remove)
+        self.steps_spin.valueChanged.connect(self.mark_stale)
+        self.seed_spin.valueChanged.connect(self.mark_stale)
+        self.run_btn.clicked.connect(self.on_run_all)
+        self.show_graphs_btn.clicked.connect(self.on_show_graphs)
+
+        self.update_controls()
+        self.set_status("No results yet. Press Run All.")
 
     # ------------------------------------------------------------------ layout
-    def _build_left_panel(self):
-        panel = QWidget()
-        panel.setFixedWidth(320)
-        lay = QVBoxLayout(panel)
+    def _build_top(self):
+        top = QWidget()
+        lay = QHBoxLayout(top)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(self._build_left_column())
+        lay.addWidget(self._build_editor(), stretch=1)
+        return top
+
+    def _build_left_column(self):
+        col = QWidget()
+        col.setFixedWidth(300)
+        lay = QVBoxLayout(col)
         lay.setContentsMargins(0, 0, 0, 0)
 
-        # Preset selector
-        preset_row = QHBoxLayout()
-        preset_row.addWidget(QLabel("Preset:"))
-        self.preset_combo = QComboBox()
-        self.preset_combo.addItems(list(SCENARIOS) + [CUSTOM])
-        preset_row.addWidget(self.preset_combo, stretch=1)
-        lay.addLayout(preset_row)
+        # Scenario list + Add / Duplicate / Remove
+        scen_box = QGroupBox("Scenarios")
+        scen_lay = QVBoxLayout(scen_box)
+        self.list = QListWidget()
+        self.list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        scen_lay.addWidget(self.list)
+        btn_row = QHBoxLayout()
+        self.add_btn = QPushButton("Add")
+        self.dup_btn = QPushButton("Duplicate")
+        self.remove_btn = QPushButton("Remove")
+        for b in (self.add_btn, self.dup_btn, self.remove_btn):
+            btn_row.addWidget(b)
+        scen_lay.addLayout(btn_row)
+        lay.addWidget(scen_box, stretch=1)
 
-        # Scenario: one row per Monte Carlo variable
-        scenario_box = QGroupBox("Scenario (shift per variable)")
-        form = QFormLayout(scenario_box)
-        for var in MC_VARS:
-            name, suffix = LABELS[var]
-            # Range comes from the dataset, not hard-coded.
-            span = float(self.df[var].max() - self.df[var].min())
-            row = ShiftRow(name, suffix, span, self.on_row_edited)
-            self.rows[var] = row
-            form.addRow(row.check, row.spin)
-        lay.addWidget(scenario_box)
-
-        # Run settings (extension)
-        run_box = QGroupBox("Run settings")
+        # Run settings: global to every scenario
+        run_box = QGroupBox("Run settings (all scenarios)")
         run_form = QFormLayout(run_box)
         self.steps_spin = QSpinBox()
         self.steps_spin.setRange(10, 100000)
         self.steps_spin.setValue(N_STEPS)
-        self.steps_spin.setSuffix(" years")
+        self.steps_spin.setSuffix(" months")
         self.seed_spin = QSpinBox()
         self.seed_spin.setRange(0, 2147483647)    # largest value a QSpinBox holds
         self.seed_spin.setValue(SEED)
-        run_form.addRow("Years", self.steps_spin)
+        run_form.addRow("Months", self.steps_spin)
         run_form.addRow("Seed", self.seed_spin)
         lay.addWidget(run_box)
 
-        # Effective shifts (after correlation propagation)
-        shifts_box = QGroupBox("Effective shifts")
-        shifts_lay = QVBoxLayout(shifts_box)
-        self.shifts_label = QLabel("Run a simulation to see the shifts applied.")
-        self.shifts_label.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
-        self.shifts_label.setWordWrap(True)
-        self.shifts_label.setToolTip(
-            "set  = pinned by you (ticked row)\n"
-            "auto = propagated from the pinned variables via the dataset's correlations"
-        )
-        shifts_lay.addWidget(self.shifts_label)
-        lay.addWidget(shifts_box)
+        # Run All + Show graphs
+        action_row = QHBoxLayout()
+        self.run_btn = QPushButton("Run All")
+        self.show_graphs_btn = QPushButton("Show graphs")
+        self.show_graphs_btn.setEnabled(False)    # nothing to show until the first run
+        action_row.addWidget(self.run_btn)
+        action_row.addWidget(self.show_graphs_btn)
+        lay.addLayout(action_row)
+        return col
 
+    def _build_editor(self):
+        self.editor_box = QGroupBox("Scenario editor")
+        lay = QVBoxLayout(self.editor_box)
+
+        form = QFormLayout()
+        self.name_edit = QLineEdit()
+        form.addRow("Name:", self.name_edit)
+        for var in MC_VARS:
+            name, suffix = LABELS[var]
+            # Range comes from the dataset, not hard-coded.
+            span = float(self.df[var].max() - self.df[var].min())
+            row = ShiftRow(name, suffix, span, self.on_editor_changed)
+            self.rows[var] = row
+            form.addRow(row.check, row.spin)
+        lay.addLayout(form)
+
+        note = QLabel("Ticked = pinned to exactly this shift.\n"
+                      "Unticked = follows the correlations (see the 'Shift' rows "
+                      "of the results table).")
+        note.setWordWrap(True)
+        lay.addWidget(note)
         lay.addStretch()
-        self.run_btn = QPushButton("Run Simulation")
-        lay.addWidget(self.run_btn)
-        return panel
+        return self.editor_box
 
-    def _build_right_panel(self):
-        # Top: the two graphs side by side
-        plots = QSplitter(Qt.Orientation.Horizontal)
-        plots.addWidget(make_plot_panel("Predictors", self.pred_canvas, self))
-        plots.addWidget(make_plot_panel("Attrition", self.attr_canvas, self))
-        plots.setChildrenCollapsible(False)
+    def _build_results(self):
+        box = QGroupBox("Results")
+        lay = QVBoxLayout(box)
+        self.status_label = QLabel()
+        lay.addWidget(self.status_label)
 
-        # Bottom: the two numeric output boxes
-        outputs = QWidget()
-        out_lay = QHBoxLayout(outputs)
-        out_lay.setContentsMargins(0, 0, 0, 0)
-        out_lay.addWidget(self._build_output_box("Predictor averages", PREDICTOR_OUTPUTS))
-        out_lay.addWidget(self._build_output_box("Attrition", ATTRITION_OUTPUTS))
-
-        split = QSplitter(Qt.Orientation.Vertical)
-        split.addWidget(plots)
-        split.addWidget(outputs)
-        split.setChildrenCollapsible(False)
-        split.setStretchFactor(0, 3)              # graphs get ~3x the height of the outputs
-        split.setStretchFactor(1, 1)
-        split.setSizes([600, 200])
-        return split
-
-    def _build_output_box(self, title, fields):
-        box = QGroupBox(title)
-        form = QFormLayout(box)
-        for text, key, fmt in fields:
-            value = QLabel("–")
-            value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            form.addRow(text, value)
-            self.value_labels[key] = (value, fmt)
+        # Rows are fixed (METRICS); columns change with every run.
+        t = self.results_table = QTableWidget()
+        t.setRowCount(len(METRICS))
+        t.setVerticalHeaderLabels([label for label, _ in METRICS])
+        t.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        t.setAlternatingRowColors(True)
+        t.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        t.horizontalHeader().setMinimumSectionSize(120)   # many scenarios -> scroll, not squash
+        lay.addWidget(t)
         return box
 
-    # ---------------------------------------------------------------- scenario
+    # ------------------------------------------------------------------ status
+    def set_status(self, text, stale=False):
+        self.status_label.setText(text)
+        self.status_label.setStyleSheet("color: #b45f06;" if stale else "")
+
+    def mark_stale(self, *_):
+        """Results on screen no longer match the scenarios/settings on screen."""
+        if self.last_results is not None:         # only meaningful after a first run
+            self.set_status(STALE_TEXT, stale=True)
+
+    def update_controls(self):
+        """Enable/disable controls from the list's state. Safe to call at any time."""
+        has = self.list.currentItem() is not None
+        self.editor_box.setEnabled(has)
+        self.dup_btn.setEnabled(has)
+        self.remove_btn.setEnabled(has)
+        self.run_btn.setEnabled(self.list.count() > 0)
+
+    # --------------------------------------------------------- scenario list
+    # Each Scenario object lives INSIDE its list item, so the list and the data
+    # cannot drift out of sync.
+    def add_scenario(self, sc):
+        item = QListWidgetItem(sc.name)
+        item.setData(Qt.ItemDataRole.UserRole, sc)
+        self.list.addItem(item)
+        return item
+
+    def current_scenario(self):
+        item = self.list.currentItem()
+        return item.data(Qt.ItemDataRole.UserRole) if item else None
+
+    def scenarios(self):
+        """In list order = column order in the results table."""
+        return [self.list.item(i).data(Qt.ItemDataRole.UserRole)
+                for i in range(self.list.count())]
+
+    def on_add(self):
+        names = [s.name for s in self.scenarios()]
+        item = self.add_scenario(Scenario(unique_name("New scenario", names)))
+        self.list.setCurrentItem(item)
+        self.name_edit.setFocus()                 # let the user type a name right away
+        self.name_edit.selectAll()
+        self.update_controls()
+        self.mark_stale()
+
+    def on_duplicate(self):
+        sc = self.current_scenario()
+        if sc is None:
+            return
+        names = [s.name for s in self.scenarios()]
+        # dict(...): a COPY. Sharing the dict would make the two scenarios edit each other.
+        copy = Scenario(unique_name(f"{sc.name} copy", names), dict(sc.shifts))
+        self.list.setCurrentItem(self.add_scenario(copy))
+        self.update_controls()
+        self.mark_stale()
+
+    def on_remove(self):
+        row = self.list.currentRow()
+        if row < 0:
+            return
+        self.list.takeItem(row)                   # Qt then selects a neighbour (or nothing)
+        # Re-evaluate AFTER the row is gone: the selection-changed signal fires
+        # while the removed row still counts in list.count().
+        self.update_controls()
+        self.mark_stale()
+
+    # ------------------------------------------------- list <-> editor binding
+    def on_selection_changed(self, current, previous):
+        self.update_controls()
+        sc = self.current_scenario()
+        if sc is not None:
+            self.load_editor(sc)
+
+    def load_editor(self, sc):
+        """Fill the editor from a scenario. Programmatic changes must not write back."""
+        self._loading = True
+        try:
+            self.name_edit.setText(sc.name)
+            for var, row in self.rows.items():
+                pinned = var in sc.shifts
+                row.set_state(pinned, sc.shifts.get(var, 0.0))
+        finally:
+            self._loading = False
+
     def collect_shifts(self):
         """Only TICKED rows go into the dict: those variables are pinned.
         Unticked ones are left out so they follow the correlations."""
         return {var: row.spin.value()
                 for var, row in self.rows.items() if row.check.isChecked()}
 
-    def apply_preset(self, shifts):
-        """Ticked + preset value if the variable is in the preset, else unticked at 0."""
-        for var, row in self.rows.items():
-            row.set_state(var in shifts, shifts.get(var, 0.0))
+    def on_editor_changed(self, *_):
+        """User edited a shift row -> write it into the selected scenario."""
+        if self._loading:
+            return
+        sc = self.current_scenario()
+        if sc is None:
+            return
+        sc.shifts = self.collect_shifts()         # a NEW dict each time
+        self.mark_stale()
 
-    def on_preset_changed(self, name):
-        if name != CUSTOM:
-            self.apply_preset(SCENARIOS[name])
+    def on_name_edited(self):
+        """Rename on editingFinished (Enter / focus out), not on every keystroke:
+        mid-typing the text would constantly collide with other names."""
+        if self._loading:
+            return
+        sc, item = self.current_scenario(), self.list.currentItem()
+        if sc is None:
+            return
+        others = [s.name for s in self.scenarios() if s is not sc]
+        new = unique_name(self.name_edit.text().strip() or "Scenario", others)
+        self.name_edit.setText(new)               # show the corrected name
+        if new == sc.name:
+            return                                # nothing changed: results are not stale
+        sc.name = new
+        item.setText(new)
+        self.mark_stale()
 
-    def on_row_edited(self, *_):
-        """User edited a row by hand -> the combo no longer describes the scenario."""
-        if self.preset_combo.currentText() != CUSTOM:
-            self.preset_combo.blockSignals(True)   # else this would re-trigger on_preset_changed
-            self.preset_combo.setCurrentText(CUSTOM)
-            self.preset_combo.blockSignals(False)
+    # ------------------------------------------------------------ results table
+    def fill_results_table(self, results, pinned_by_name):
+        t = self.results_table
+        names = list(results)
+        t.setColumnCount(0)                       # drop old columns (do NOT call t.clear():
+        t.setColumnCount(len(names))              #   it also erases the vertical header labels)
+        t.setHorizontalHeaderLabels(names)
+        for col, name in enumerate(names):
+            for row, (_, fmt) in enumerate(METRICS):
+                item = QTableWidgetItem(fmt(results[name], pinned_by_name[name]))
+                item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                t.setItem(row, col, item)
 
-    # ----------------------------------------------------------------- outputs
-    def show_summary(self, result):
-        for key, (label, fmt) in self.value_labels.items():
-            label.setText(fmt(result.summary[key]))
+    # ------------------------------------------------------------------- graphs
+    def _place_plot_windows(self):
+        """Cascade the two windows once, so they don't open on top of each other."""
+        if self._plots_placed:
+            return
+        self._plots_placed = True
+        for i, (win, _) in enumerate(self.plot_windows.values()):
+            win.move(self.x() + 60 + 40 * i, self.y() + 60 + 40 * i)
 
-    def show_effective_shifts(self, applied, requested):
-        """One line per variable: value + origin ('set' = pinned, 'auto' = propagated)."""
-        lines = []
-        for var in MC_VARS:
-            origin = "set" if var in requested else "auto"
-            lines.append(f"{LABELS[var][0]:<16}{_signed(applied[var])} ({origin})")
-        self.shifts_label.setText("\n".join(lines))
+    def draw_graphs(self, histories):
+        self._place_plot_windows()
+        for win, plot_fn in self.plot_windows.values():
+            plot_fn(win.canvas.fig, histories)
+            win.canvas.draw_idle()
+            if not win.isVisible():
+                win.show()
+                win.raise_()
 
-    # --------------------------------------------------------------------- run
-    def on_run(self):
-        shifts = self.collect_shifts()
+    def on_show_graphs(self):
+        """Reopen windows the user closed, without re-running."""
+        for win, _ in self.plot_windows.values():
+            win.show()
+            win.raise_()
+
+    # ---------------------------------------------------------------------- run
+    def on_run_all(self):
+        scenarios = self.scenarios()
+        if not scenarios:
+            return
+        pinned = {sc.name: dict(sc.shifts) for sc in scenarios}   # snapshot taken at run time
+        n_steps, seed = self.steps_spin.value(), self.seed_spin.value()
         try:
-            result = run_simulation(self.df, self.corr, self.model, shifts,
-                                    n_steps=self.steps_spin.value(),
-                                    seed=self.seed_spin.value())
-        except (ValueError, np.linalg.LinAlgError) as exc:
-            # e.g. a singular covariance sub-matrix when ticked variables are perfectly correlated
-            QMessageBox.warning(self, "Simulation error", str(exc))
+            results, errors = run_scenarios(self.df, self.corr, self.model, scenarios,
+                                            n_steps=n_steps, seed=seed)
+        except Exception as exc:                  # slots must not raise (it would kill the app)
+            QMessageBox.critical(self, "Run failed", str(exc))
             return
 
-        plot_predictors(self.pred_canvas.fig, result.history)
-        plot_attrition(self.attr_canvas.fig, result.history)
-        self.pred_canvas.draw_idle()
-        self.attr_canvas.draw_idle()
+        if errors:
+            QMessageBox.warning(self, "Some scenarios failed",
+                                "\n".join(f"{name}: {msg}" for name, msg in errors.items()))
+        if not results:
+            return
 
-        self.show_summary(result)
-        self.show_effective_shifts(result.applied_shifts, shifts)
-        self.statusBar().showMessage(
-            f"Ran {len(result.history)} years (seed {self.seed_spin.value()})")
+        self.last_results, self.last_shifts = results, pinned
+        self.fill_results_table(results, pinned)
+        self.draw_graphs({name: r.history for name, r in results.items()})
+        self.show_graphs_btn.setEnabled(True)
+        failed = f", {len(errors)} failed" if errors else ""
+        self.set_status(f"Up to date: {len(results)} scenario(s){failed}, "
+                        f"{n_steps} months, seed {seed}")
+
+    # ----------------------------------------------------------------- shutdown
+    def closeEvent(self, event):
+        for win, _ in self.plot_windows.values():
+            win.close()
+        super().closeEvent(event)
+
+
+def install_excepthook():
+    """An exception raised inside a Qt slot would otherwise abort the whole app.
+    Show it in a dialog instead (the traceback is still printed to the terminal)."""
+    def hook(exc_type, exc, tb):
+        sys.__excepthook__(exc_type, exc, tb)
+        if not issubclass(exc_type, KeyboardInterrupt):
+            QMessageBox.critical(None, "Unexpected error", f"{exc_type.__name__}: {exc}")
+    sys.excepthook = hook
 
 
 def main():
     app = QApplication(sys.argv)
+    install_excepthook()
     try:
         # The dataset never changes during a session: fit once, reuse on every run.
         df, corr, model = load_and_fit()
@@ -307,9 +513,12 @@ def main():
         sys.exit(1)
 
     win = MainWindow(df, corr, model)
-    win.resize(1300, 800)
+    for sc in default_scenarios():            # baseline, heavy overtime, weak management
+        win.add_scenario(sc)
+    win.list.setCurrentRow(0)
+    win.resize(1100, 750)
     win.show()
-    QTimer.singleShot(0, win.on_run)    # run the baseline once so the window isn't empty
+    QTimer.singleShot(0, win.on_run_all)      # run once so nothing is empty at launch
     sys.exit(app.exec())
 
 

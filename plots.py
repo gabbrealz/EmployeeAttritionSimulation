@@ -2,10 +2,15 @@
 Plotting for the attrition simulation. No Qt imports, and no matplotlib.pyplot:
 every function receives a matplotlib Figure, clears it and redraws on it.
 
-Both functions take the `history` DataFrame returned by
-simulation.run_simulation (index = year, columns = the 5 predictors,
-p_attrition, resigned). If `baseline` (another history) is given, its smoothed
-series are drawn as a gray dashed line for comparison.
+Both functions take `histories`: a dict mapping scenario name -> the `history`
+DataFrame returned by simulation.run_simulation (index = month; columns = the 5
+predictors, p_attrition, resigned). Insertion order = legend order.
+
+  * several scenarios: ROLLING MEANS only, one line per scenario (overlaying
+    several noisy raw series is unreadable; the shift between scenarios is the signal)
+  * one scenario: thin raw line + rolling mean, as a single-scenario detail view
+
+Each scenario gets the same color in every figure (by its position in `histories`).
 """
 from simulation import BOUNDS
 
@@ -18,82 +23,95 @@ PREDICTORS = [  # (column, axis label)
 ]
 
 # Y labels are rotated and the 5 stacked axes are short, so keep them small and
-# (where long) two-line; otherwise neighbouring labels overlap in a ~450 px panel.
+# (where long) two-line; otherwise neighbouring labels overlap.
 LABEL_SIZE = 8
 
-RAW_STYLE = dict(lw=0.6, alpha=0.35)       # thin, faint: the per-year noise
+RAW_STYLE = dict(lw=0.6, alpha=0.35)       # thin, faint: the per-month noise
 SMOOTH_STYLE = dict(lw=1.8)                # thick: the trend
-BASE_STYLE = dict(color="0.45", ls="--", lw=1.4, label="baseline")
+
+
+def _colors(histories):
+    """name -> matplotlib color. Same scenario, same color, in every figure."""
+    return {name: f"C{i % 10}" for i, name in enumerate(histories)}   # repeats after 10
 
 
 def _smooth(series, n_steps):
-    """Rolling mean over max(1, n_steps // 20) years."""
+    """Rolling mean over max(1, n_steps // 20) months."""
     return series.rolling(max(1, n_steps // 20), min_periods=1).mean()
 
 
-def plot_predictors(fig, history, baseline=None):
-    """5 stacked axes (shared x): the predictor variables over the simulated years."""
+def _legend(ax, histories):
+    ax.legend(ncol=min(len(histories), 4), fontsize="small", frameon=False)
+
+
+def plot_predictors(fig, histories):
+    """5 stacked axes (shared x): the predictor variables over the simulated months."""
     fig.clear()
+    if not histories:
+        return
+    colors = _colors(histories)
+    single = len(histories) == 1
     axes = fig.subplots(len(PREDICTORS), 1, sharex=True)
-    n = len(history)
 
-    for i, (ax, (col, label)) in enumerate(zip(axes, PREDICTORS)):
-        color = f"C{i}"                             # same hue for raw + smoothed line
-        ax.plot(history.index, history[col], color=color, **RAW_STYLE)
+    for ax, (col, label) in zip(axes, PREDICTORS):
+        for name, h in histories.items():
+            if single:
+                ax.plot(h.index, h[col], color=colors[name], **RAW_STYLE)
+            # years_since_promotion for ONE scenario: raw only. The sawtooth
+            # (+1/year, reset after a resignation) is the signal there. With
+            # several scenarios the rolling mean is drawn instead: a scenario
+            # with more resignations shows a lower average.
+            if not (single and col == "years_since_promotion"):
+                ax.plot(h.index, _smooth(h[col], len(h)), color=colors[name],
+                        label=name, **SMOOTH_STYLE)
 
-        # years_since_promotion: raw only. The sawtooth (+1/year, reset after a
-        # resignation) is the signal; smoothing it would hide that.
-        if col != "years_since_promotion":
-            ax.plot(history.index, _smooth(history[col], n), color=color, **SMOOTH_STYLE)
-
-        if baseline is not None:
-            ax.plot(baseline.index, _smooth(baseline[col], len(baseline)), **BASE_STYLE)
-
-        # Fixed y-limits (from BOUNDS) so two scenarios are visually comparable;
+        # Fixed y-limits (from BOUNDS) so runs stay visually comparable;
         # None = leave that side on autoscale (overtime top, years top).
         lo, hi = BOUNDS.get(col, (0, None))
         ax.set_ylim(bottom=lo, top=hi)
         ax.set_ylabel(label, fontsize=LABEL_SIZE)
         ax.grid(True, alpha=0.25)
 
-    if baseline is not None:
-        axes[0].legend(loc="upper right", fontsize="small", frameon=False)
-    axes[-1].set_xlabel("Year")
-    fig.suptitle("Predictor variables")
+    _legend(axes[0], histories)
+    axes[-1].set_xlabel("Month")
+    fig.suptitle(f"Predictor variables ({len(histories)} scenario(s))")
 
 
-def plot_attrition(fig, history, baseline=None):
-    """2 stacked axes (shared x): cumulative resignations and yearly P(attrition)."""
+def plot_attrition(fig, histories):
+    """2 stacked axes (shared x): cumulative resignations and monthly P(attrition)."""
     fig.clear()
+    if not histories:
+        return
+    colors = _colors(histories)
+    single = len(histories) == 1
     ax_cum, ax_p = fig.subplots(2, 1, sharex=True)
-    n = len(history)
 
-    # Top: cumulative resignations. The slope is the turnover rate.
-    ax_cum.step(history.index, history["resigned"].cumsum(), where="post", lw=1.6,
-                label="scenario")
-    if baseline is not None:
-        ax_cum.step(baseline.index, baseline["resigned"].cumsum(), where="post",
-                    **BASE_STYLE)
-        ax_cum.legend(loc="upper left", fontsize="small", frameon=False)
+    for name, h in histories.items():
+        c = colors[name]
+        # Top: cumulative resignations. The slope is the turnover rate, so the
+        # slopes of different scenarios compare turnover directly.
+        ax_cum.plot(h.index, h["resigned"].cumsum(), drawstyle="steps-post",
+                    lw=1.6, color=c, label=name)
+
+        # Bottom: rolling mean of P(attrition); one scenario also gets the raw
+        # monthly probability (faint) and a red tick at every resignation month.
+        if single:
+            ax_p.plot(h.index, h["p_attrition"], color=c, **RAW_STYLE)
+        ax_p.plot(h.index, _smooth(h["p_attrition"], len(h)), color=c,
+                  label=name, **SMOOTH_STYLE)
+        if single:
+            left = h.index[h["resigned"] == 1]
+            ax_p.plot(left, [0] * len(left), ls="none", marker="|", ms=9, color="red",
+                      transform=ax_p.get_xaxis_transform(), clip_on=False)
+
     ax_cum.set_ylim(bottom=0)
     ax_cum.set_ylabel("Cumulative\nresignations", fontsize=LABEL_SIZE)
     ax_cum.grid(True, alpha=0.25)
+    _legend(ax_cum, histories)
 
-    # Bottom: P(attrition) per year (faint), its rolling mean (thick), and a
-    # red tick on the x-axis at every year in which the employee resigned.
-    color = "C1"
-    ax_p.plot(history.index, history["p_attrition"], color=color, **RAW_STYLE)
-    ax_p.plot(history.index, _smooth(history["p_attrition"], n), color=color, **SMOOTH_STYLE)
-    if baseline is not None:
-        ax_p.plot(baseline.index, _smooth(baseline["p_attrition"], len(baseline)),
-                  **BASE_STYLE)
-
-    left = history.index[history["resigned"] == 1]
-    ax_p.plot(left, [0] * len(left), ls="none", marker="|", ms=9, color="red",
-              transform=ax_p.get_xaxis_transform(), clip_on=False)
     ax_p.set_ylim(bottom=0)
     ax_p.set_ylabel("P(attrition)", fontsize=LABEL_SIZE)
-    ax_p.set_xlabel("Year")
+    ax_p.set_xlabel("Month")
     ax_p.grid(True, alpha=0.25)
 
-    fig.suptitle("Attrition")
+    fig.suptitle(f"Attrition ({len(histories)} scenario(s))")
