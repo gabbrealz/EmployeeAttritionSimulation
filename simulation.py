@@ -25,7 +25,7 @@ from scipy.special import expit          # logistic function: 1 / (1 + e^-x)
 # ----------------------------------------------------------------------------
 # Resolved relative to this file, so the GUI works from any working directory.
 CSV_PATH = Path(__file__).with_name("dataset.csv")   # columns = the state variable names
-N_STEPS = 1000                   # default iterations per run (1 iteration = 1 year)
+N_STEPS = 12*10     # 10 years
 SEED = 42
 
 # Initial state of every new employee. Only years_since_promotion is actually

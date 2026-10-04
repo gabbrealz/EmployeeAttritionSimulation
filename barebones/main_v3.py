@@ -23,7 +23,7 @@ from scipy.special import expit          # logistic function: 1 / (1 + e^-x)
 # Configuration
 # ----------------------------------------------------------------------------
 CSV_PATH = "dataset.csv"   # columns = the state variable names
-DEFAULT_N_STEPS = 1000           # months per run if the input is left blank (1 iteration = 1 month)
+DEFAULT_N_STEPS = 12*10          # months per run if the input is left blank (10 years)
 MAX_N_STEPS = 100_000            # upper limit accepted by the input prompt
 STEP_YEARS = 1 / 12              # time added to years_since_promotion per iteration
 SEED = 42
