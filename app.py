@@ -269,13 +269,15 @@ class MainWindow(QMainWindow):
         form = QFormLayout()
         self.name_edit = QLineEdit()
         form.addRow("Name:", self.name_edit)
+
         for var in MC_VARS:
             name, suffix = LABELS[var]
-            # Range comes from the dataset, not hard-coded.
-            span = float(self.df[var].max() - self.df[var].min())
+            span = 100 if var == "overtime_hours_per_week" else 10
+
             row = ShiftRow(name, suffix, span, self.on_editor_changed)
             self.rows[var] = row
             form.addRow(row.check, row.spin)
+
         lay.addLayout(form)
 
         note = QLabel("Ticked = pinned to exactly this shift.\n"
