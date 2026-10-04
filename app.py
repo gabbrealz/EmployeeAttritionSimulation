@@ -23,19 +23,16 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
 )
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
-from matplotlib.figure import Figure          # never matplotlib.pyplot
+from matplotlib.figure import Figure
 
 from plots import plot_attrition, plot_predictors
-from simulation import (
-    CSV_PATH, MC_VARS, N_STEPS, SEED, Scenario, default_scenarios,
-    load_and_fit, run_scenarios,
-)
+from simulation import CSV_PATH, MC_VARS, N_STEPS, SEED, Scenario, default_scenarios, load_and_fit, run_scenarios
 
 LABELS = {  # variable -> (display name, spin-box suffix)
-    "overtime_hours_per_week": ("Overtime", " h/wk"),
-    "burnout_score": ("Burnout", " pts"),
-    "engagement_score": ("Engagement", " pts"),
-    "manager_support_score": ("Manager support", " pts"),
+    "overtime_hours_per_week": ("Overtime hours", " h/wk"),
+    "burnout_score": ("Burnout score", " pts"),
+    "engagement_score": ("Engagement score", " pts"),
+    "manager_support_score": ("Manager support score", " pts"),
 }
 
 SHIFT_TOOLTIP = (
@@ -76,16 +73,16 @@ def _shift_cell(var):
 
 METRICS = [
     # attrition
-    ("Resignations",          _summary_cell("employee_attrition", _int)),
-    ("Turnover rate",         _summary_cell("turnover_rate", _pct)),
-    ("Avg P(attrition)",      _summary_cell("avg_attrition_probability", _f3)),
-    ("Months simulated",       _summary_cell("time_elapsed", _int)),
+    ("Resignations",                _summary_cell("employee_attrition", _int)),
+    ("Turnover rate",               _summary_cell("turnover_rate", _pct)),
+    ("Avg attrition probability",   _summary_cell("avg_attrition_probability", _f3)),
+    ("Months simulated",            _summary_cell("time_elapsed", _int)),
     # predictor averages
-    ("Overtime (h/week)",     _summary_cell("avg_hours_overtime", _f2)),
-    ("Burnout",               _summary_cell("avg_employee_burnout", _f2)),
-    ("Engagement",            _summary_cell("avg_employee_engagement", _f2)),
-    ("Manager support",       _summary_cell("avg_manager_support", _f2)),
-    ("Years since promotion", _summary_cell("avg_years_since_promotion", _f2)),
+    ("Overtime hours per week",     _summary_cell("avg_hours_overtime", _f2)),
+    ("Burnout score",               _summary_cell("avg_employee_burnout", _f2)),
+    ("Engagement score",            _summary_cell("avg_employee_engagement", _f2)),
+    ("Manager support score",       _summary_cell("avg_manager_support", _f2)),
+    ("Years since promotion",       _summary_cell("avg_years_since_promotion", _f2)),
 ] + [
     # effective shifts (after correlation propagation)
     (f"Shift: {LABELS[var][0].lower()}", _shift_cell(var)) for var in MC_VARS

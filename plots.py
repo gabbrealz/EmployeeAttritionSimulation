@@ -15,10 +15,10 @@ Each scenario gets the same color in every figure (by its position in `histories
 from simulation import BOUNDS
 
 PREDICTORS = [  # (column, axis label)
-    ("overtime_hours_per_week", "Overtime\n(h/week)"),
-    ("burnout_score", "Burnout"),
-    ("engagement_score", "Engagement"),
-    ("manager_support_score", "Manager\nsupport"),
+    ("overtime_hours_per_week", "Overtime hours\nper week"),
+    ("burnout_score", "Burnout\nscore"),
+    ("engagement_score", "Engagement\nscore"),
+    ("manager_support_score", "Manager support\nscore"),
     ("years_since_promotion", "Years since\npromotion"),
 ]
 
@@ -74,7 +74,7 @@ def plot_predictors(fig, histories):
 
     _legend(axes[0], histories)
     axes[-1].set_xlabel("Month")
-    fig.suptitle(f"Predictor variables ({len(histories)} scenario(s))")
+    fig.suptitle(f"Predictor variables ({len(histories)} scenario/s)")
 
 
 def plot_attrition(fig, histories):
@@ -105,13 +105,13 @@ def plot_attrition(fig, histories):
                       transform=ax_p.get_xaxis_transform(), clip_on=False)
 
     ax_cum.set_ylim(bottom=0)
-    ax_cum.set_ylabel("Cumulative\nresignations", fontsize=LABEL_SIZE)
+    ax_cum.set_ylabel("Cumulative attrition", fontsize=LABEL_SIZE)
     ax_cum.grid(True, alpha=0.25)
     _legend(ax_cum, histories)
 
     ax_p.set_ylim(bottom=0)
-    ax_p.set_ylabel("P(attrition)", fontsize=LABEL_SIZE)
+    ax_p.set_ylabel("Attrition probability", fontsize=LABEL_SIZE)
     ax_p.set_xlabel("Month")
     ax_p.grid(True, alpha=0.25)
 
-    fig.suptitle(f"Attrition ({len(histories)} scenario(s))")
+    fig.suptitle(f"Attrition ({len(histories)} scenario/s)")

@@ -1,7 +1,7 @@
 """
 Employee attrition risk simulation (single agent, replacement-style).
 
-Each iteration (= 1 year):
+Each iteration (= 1 month):
   1. Gaussian-copula Monte Carlo draws overtime, burnout, engagement, manager support
   2. years_since_promotion += 1
   3. A logistic regression turns the state into P(attrition)
@@ -200,7 +200,7 @@ def run_simulation(df, corr, model, shifts, n_steps=N_STEPS, seed=SEED):
 
 
 # ----------------------------------------------------------------------------
-# 5. Scenario layer (several scenarios, one shared years/seed)
+# 5. Scenario layer (several scenarios, one shared n_steps/seed)
 # ----------------------------------------------------------------------------
 @dataclass
 class Scenario:
@@ -215,7 +215,7 @@ def default_scenarios():
 
 
 def run_scenarios(df, corr, model, scenarios, n_steps=N_STEPS, seed=SEED):
-    """Run every scenario with the same years and seed.
+    """Run every scenario with the same months and seed.
 
     Each run_simulation call seeds its own RNG, so all scenarios see the same
     underlying random draws (common random numbers): differences between them
