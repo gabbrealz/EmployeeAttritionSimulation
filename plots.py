@@ -27,7 +27,7 @@ PREDICTORS = [  # (column, axis label)
 LABEL_SIZE = 8
 
 RAW_STYLE = dict(lw=0.6, alpha=0.35)       # thin, faint: the per-month noise
-SMOOTH_STYLE = dict(lw=1.8)                # thick: the trend
+SMOOTH_STYLE = dict(lw=1)                # thick: the trend
 
 
 def _colors(histories):
