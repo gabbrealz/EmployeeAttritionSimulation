@@ -20,11 +20,9 @@ from scipy.special import expit          # logistic function: 1 / (1 + e^-x)
 # ----------------------------------------------------------------------------
 CSV_PATH = "dataset.csv"         # columns = the state variable names
 N_STEPS = 1000                   # iterations per run (1 iteration = 1 month)
-STEP_YEARS = 1 / 12              # time added to years_since_promotion per iteration
 SEED = 42
 
-PLOT_FILE = None                 # set to None to skip saving the figure
-SMOOTH_WINDOW = 12               # months, rolling mean applied to the predictor plots
+SMOOTH_WINDOW = 12                   # months, rolling mean applied to the predictor plots
 
 # Initial state of every new employee. Only years_since_promotion is actually
 # needed by the loop: the other four are redrawn by Monte Carlo every step.
@@ -158,7 +156,7 @@ def run_simulation(df, corr, model, shifts, seed=SEED):
     resigned_log = np.zeros(N_STEPS, dtype=int)
 
     for t in range(N_STEPS):
-        years += STEP_YEARS                           # deterministic update (+1 month)
+        years += 1/12                                 # deterministic update (+1 month)
         years_log[t] = years                          # state the model sees
 
         x = np.append(mc_values[t], years)            # full state, FEATURES order
@@ -200,13 +198,14 @@ def plot_results(histories):
 
     for name, h in histories.items():
         for ax, (col, _) in zip(axes, PREDICTOR_PANELS):
-            ax.plot(h.index, h[col].rolling(SMOOTH_WINDOW, min_periods=1).mean(),
-                    label=name, linewidth=1.3)
+            ax.plot(h.index, h[col].rolling(SMOOTH_WINDOW, min_periods=1).mean(), label=name, linewidth=1.3)
+            
         axes[5].plot(h.index, h["cum_attrition"], label=name, linewidth=1.5)
 
     for ax, (_, label) in zip(axes, PREDICTOR_PANELS):
         ax.set_ylabel(label)
         ax.set_title(f"{label} ({SMOOTH_WINDOW}-month rolling mean)", fontsize=10)
+        
     axes[5].set_ylabel("Cumulative attrition")
     axes[5].set_title("Cumulative attrition (employees who resigned)", fontsize=10)
     axes[5].legend(title="Scenario")
@@ -218,8 +217,6 @@ def plot_results(histories):
 
     fig.suptitle("Employee attrition simulation: predictors and attrition by scenario", fontsize=13)
     fig.tight_layout()
-    if PLOT_FILE:
-        fig.savefig(PLOT_FILE, dpi=150)
     plt.show()
 
 
@@ -236,5 +233,6 @@ if __name__ == "__main__":
     for name, shifts in SCENARIOS.items():
         summaries[name], histories[name] = run_simulation(df, corr, model, shifts)
 
-    print(pd.DataFrame.from_dict(summaries, orient="index").round(3).to_string())
+    table = pd.DataFrame.from_dict(summaries, orient="index").round(3).astype(object).T
+    print(table.to_string())
     plot_results(histories)
