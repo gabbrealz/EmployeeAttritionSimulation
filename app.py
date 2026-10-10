@@ -6,8 +6,9 @@ PyQt6 front-end for the employee attrition simulation: multi-scenario manager.
 Main window: a scenario list (add / duplicate / remove), an editor for the
 selected scenario, shared run settings (months, seed) and a results table with
 one column per scenario. "Run All" simulates every scenario with the same
-months and seed; the graphs open in two separate windows (predictors,
-attrition), each overlaying all scenarios.
+months and seed. The main window has a Home tab (scenario management, run
+settings, results) and a Visualizations tab (the three graphs, one at a time,
+with a drop-down and Previous/Next buttons).
 
 This file contains no statistics: all maths lives in simulation.py, all
 drawing in plots.py.
@@ -21,6 +22,7 @@ from PyQt6.QtWidgets import (
     QGroupBox, QFormLayout, QCheckBox, QDoubleSpinBox, QSpinBox, QLabel, QComboBox,
     QPushButton, QMessageBox, QListWidget, QListWidgetItem, QLineEdit,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QGridLayout,
+    QTabWidget, QStackedWidget,
 )
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
@@ -112,30 +114,26 @@ class MplCanvas(FigureCanvasQTAgg):
         super().__init__(self.fig)
 
 
-class PlotWindow(QWidget):
-    """A standalone top-level window holding one canvas and its toolbar.
-    It owns its plot function and exposes update_plot(histories), so the main
-    window treats every figure window the same way. Closing it only hides it:
-    the object lives on, so it can be redrawn and shown again at any time."""
+class PlotPanel(QWidget):
+    """One graph page inside the Visualizations tab. It owns its
+    plot function and exposes update_plot(histories), so the main window treats
+    every graph the same way."""
 
     def __init__(self, title, plot_fn, parent=None):
-        # Qt.WindowType.Window makes this a separate top-level window, while
-        # `parent` keeps it owned by (and closed with) the main window.
-        super().__init__(parent, Qt.WindowType.Window)
-        self.setWindowTitle(title)
+        super().__init__(parent)                 # a plain child widget, NOT a top-level window
+        self.title = title                       # shown in the graph drop-down
         self.plot_fn = plot_fn
         self.canvas = MplCanvas()
         lay = QVBoxLayout(self)
         lay.addWidget(NavigationToolbar2QT(self.canvas, self))
         lay.addWidget(self.canvas)
-        self.resize(900, 700)
 
     def update_plot(self, histories):
         self.plot_fn(self.canvas.fig, histories)
         self.canvas.draw_idle()
 
 
-class ScatterWindow(PlotWindow):
+class ScatterPanel(PlotPanel):
     """Four scatterplots of ONE scenario at a time, chosen in a combo box.
     (Color marks resigned vs stayed here, so scenarios cannot also be color-coded.)
     Switching scenario redraws from the stored histories; it does not re-run."""
@@ -149,7 +147,6 @@ class ScatterWindow(PlotWindow):
         bar.addWidget(self.combo, 1)
         self.layout().insertLayout(0, bar)           # above the matplotlib toolbar
         self.combo.currentTextChanged.connect(self._draw)
-        self.resize(1000, 800)
 
     def update_plot(self, histories):                # called after every Run All
         self.histories = histories
@@ -263,28 +260,14 @@ class MainWindow(QMainWindow):
         self.last_results = None     # name -> SimulationResult of the last run
         self.last_shifts = None      # name -> pinned shifts as they were at that run
         self._loading = False        # True while the editor is being filled programmatically
-        self._plots_placed = False
-
-        # The three graph windows: created now, hidden until the first run. Parented
-        # to this window (so they are kept alive and closed with it).
-        self.plot_windows = [
-            PlotWindow("Predictor variables", plot_predictors, self),
-            PlotWindow("Attrition", plot_attrition, self),
-            ScatterWindow(self),
-        ]
 
         self.rep_window = ReplicationWindow(self)
-        central = QWidget()
-        self.setCentralWidget(central)
-        outer = QVBoxLayout(central)
-        split = QSplitter(Qt.Orientation.Vertical)
-        split.addWidget(self._build_top())
-        split.addWidget(self._build_results())
-        split.setChildrenCollapsible(False)
-        split.setStretchFactor(0, 1)
-        split.setStretchFactor(1, 2)
-        split.setSizes([320, 430])
-        outer.addWidget(split)
+
+        self.tabs = QTabWidget()                      # its tab bar = the navigation bar
+        self.tabs.setDocumentMode(True)
+        self.setCentralWidget(self.tabs)
+        self.tabs.addTab(self._build_home(), "Home")
+        self.tabs.addTab(self._build_visualizations(), "Visualizations")
 
         # Connect once, here, after every widget exists.
         self.list.currentItemChanged.connect(self.on_selection_changed)
@@ -298,11 +281,68 @@ class MainWindow(QMainWindow):
         self.seed_check.toggled.connect(self.mark_stale)             # a run setting changed
         self.run_btn.clicked.connect(self.on_run_all)
         self.rep_btn.clicked.connect(self.on_run_replications)
+        # Graph navigation: the combo is the single source of truth; the stack follows it.
+        self.viz_combo.currentIndexChanged.connect(self.viz_stack.setCurrentIndex)
+        self.prev_btn.clicked.connect(self.on_prev_graph)
+        self.next_btn.clicked.connect(self.on_next_graph)
 
         self.update_controls()
+        self.set_graphs_available(False)          # show the hint until the first run
         self.set_status("No results yet. Press Run All.")
 
     # ------------------------------------------------------------------ layout
+    def _build_home(self):
+        """The Home tab: settings / scenarios / editor on top, results below."""
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        split = QSplitter(Qt.Orientation.Vertical)
+        split.addWidget(self._build_top())
+        split.addWidget(self._build_results())
+        split.setChildrenCollapsible(False)
+        split.setStretchFactor(0, 1)
+        split.setStretchFactor(1, 2)
+        split.setSizes([320, 430])
+        lay.addWidget(split)
+        return page
+
+    def _build_visualizations(self):
+        """The Visualizations tab: a navigation row, then ONE graph at a time."""
+        page = QWidget()
+        lay = QVBoxLayout(page)
+
+        # Navigation row: Graph drop-down, Previous, Next, (spacer), status
+        nav = QHBoxLayout()
+        nav.addWidget(QLabel("Graph:"))
+        self.viz_combo = QComboBox()
+        self.viz_combo.setMinimumWidth(220)
+        nav.addWidget(self.viz_combo)
+        self.prev_btn = QPushButton("Previous")
+        self.next_btn = QPushButton("Next")
+        nav.addWidget(self.prev_btn)
+        nav.addWidget(self.next_btn)
+        nav.addStretch(1)
+        self.viz_status = QLabel()                # mirrors the Home status line
+        nav.addWidget(self.viz_status)
+        lay.addLayout(nav)
+
+        # Shown until the first successful run
+        self.viz_hint = QLabel("No graphs yet. Press Run All on the Home tab.")
+        self.viz_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(self.viz_hint, 1)
+
+        # One page per graph; a QStackedWidget shows exactly one at a time
+        self.viz_stack = QStackedWidget()
+        self.panels = [
+            PlotPanel("Predictor variables", plot_predictors),
+            PlotPanel("Attrition", plot_attrition),
+            ScatterPanel(),
+        ]
+        for panel in self.panels:
+            self.viz_stack.addWidget(panel)       # also reparents the panel into the stack
+            self.viz_combo.addItem(panel.title)   # same order => combo index == stack index
+        lay.addWidget(self.viz_stack, 1)
+        return page
+
     def _build_top(self):
         top = QWidget()
         grid = QGridLayout(top)
@@ -316,13 +356,19 @@ class MainWindow(QMainWindow):
         return top
 
     def _build_run_column(self):
+        """Column 1: two group boxes, each with its own Run button INSIDE it.
+        The boxes share the column height equally (stretch 1 each) and nothing
+        is stretched below them, so the column ends flush with the Scenarios and
+        Scenario editor boxes beside it. Spare height goes to empty space at the
+        bottom of each box, the same way the Scenario editor handles it."""
         col = QWidget()
         lay = QVBoxLayout(col)
         lay.setContentsMargins(0, 0, 0, 0)
 
-        # --- Simulation settings: Months, Fixed seed -------------------------
+        # --- Simulation settings: Months, Fixed seed, Run All ----------------
         sim_box = QGroupBox("Simulation settings")
-        sim_form = QFormLayout(sim_box)
+        sim_lay = QVBoxLayout(sim_box)
+        sim_form = QFormLayout()
         self.steps_spin = QSpinBox()
         self.steps_spin.setRange(10, 100000)
         self.steps_spin.setValue(N_STEPS)
@@ -338,14 +384,17 @@ class MainWindow(QMainWindow):
             "Unticked: a new random seed is drawn on each Run All (shown in the status line).")
         sim_form.addRow("Months", self.steps_spin)
         sim_form.addRow(self.seed_check, self.seed_spin)
-        lay.addWidget(sim_box)
+        sim_lay.addLayout(sim_form)
 
         self.run_btn = QPushButton("Run All")
-        lay.addWidget(self.run_btn)
+        sim_lay.addWidget(self.run_btn)
+        sim_lay.addStretch()                      # fields + button stay packed at the top of the box
+        lay.addWidget(sim_box, 1)
 
-        # --- Replication Settings: Replications, Target reduction -------------
+        # --- Replication Settings: Replications, Target reduction, Run replications
         rep_box = QGroupBox("Replication Settings")
-        rep_form = QFormLayout(rep_box)
+        rep_lay = QVBoxLayout(rep_box)
+        rep_form = QFormLayout()
         self.runs_spin = QSpinBox()
         self.runs_spin.setRange(2, 10000)
         self.runs_spin.setValue(100)
@@ -356,15 +405,16 @@ class MainWindow(QMainWindow):
         self.target_spin.setSuffix(" %")
         rep_form.addRow("Replications", self.runs_spin)
         rep_form.addRow("Target reduction", self.target_spin)
-        lay.addWidget(rep_box)
+        rep_lay.addLayout(rep_form)
 
         self.rep_btn = QPushButton("Run replications")
         self.rep_btn.setToolTip("Runs every scenario many times and compares each with the "
                                 "FIRST scenario in the list (the baseline).")
-        lay.addWidget(self.rep_btn)
+        rep_lay.addWidget(self.rep_btn)
+        rep_lay.addStretch()                      # fields + button stay packed at the top of the box
+        lay.addWidget(rep_box, 1)
 
-        lay.addStretch()                          # keep everything packed at the top
-        return col
+        return col                                # no stretch below: the boxes fill the column
 
     def _build_scenarios(self):
         scen_box = QGroupBox("Scenarios")
@@ -420,8 +470,29 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ status
     def set_status(self, text, stale=False):
-        self.status_label.setText(text)
-        self.status_label.setStyleSheet("color: #b45f06;" if stale else "")
+        """Show the status on the Home tab AND on the Visualizations tab: the graphs
+        go stale exactly when the results table does."""
+        style = "color: #b45f06;" if stale else ""
+        for label in (self.status_label, self.viz_status):
+            label.setText(text)
+            label.setStyleSheet(style)
+
+    # ------------------------------------------------------- graph navigation
+    def on_prev_graph(self):
+        n = self.viz_combo.count()
+        self.viz_combo.setCurrentIndex((self.viz_combo.currentIndex() - 1) % n)   # wraps around
+
+    def on_next_graph(self):
+        n = self.viz_combo.count()
+        self.viz_combo.setCurrentIndex((self.viz_combo.currentIndex() + 1) % n)
+
+    def set_graphs_available(self, available):
+        """Before the first run there is nothing to show: disable the graph controls
+        and show the hint instead of empty canvases."""
+        for w in (self.viz_combo, self.prev_btn, self.next_btn):
+            w.setEnabled(available)
+        self.viz_stack.setVisible(available)
+        self.viz_hint.setVisible(not available)
 
     def mark_stale(self, *_):
         """Results on screen no longer match the scenarios/settings on screen."""
@@ -550,21 +621,12 @@ class MainWindow(QMainWindow):
                 t.setItem(row, col, item)
 
     # ------------------------------------------------------------------- graphs
-    def _place_plot_windows(self):
-        """Cascade the two windows once, so they don't open on top of each other."""
-        if self._plots_placed:
-            return
-        self._plots_placed = True
-        for i, win in enumerate(self.plot_windows):
-            win.move(self.x() + 60 + 40 * i, self.y() + 60 + 40 * i)
-
     def draw_graphs(self, histories):
-        self._place_plot_windows()
-        for win in self.plot_windows:
-            win.update_plot(histories)
-            if not win.isVisible():
-                win.show()
-                win.raise_()
+        """Redraw every graph page in place. Nothing is shown or raised: the graphs live
+        in the Visualizations tab, which the user opens when they want to look."""
+        for panel in self.panels:
+            panel.update_plot(histories)
+        self.set_graphs_available(True)
 
     # ---------------------------------------------------------------------- run
     def resolve_seed(self):
@@ -633,8 +695,7 @@ class MainWindow(QMainWindow):
 
     # ----------------------------------------------------------------- shutdown
     def closeEvent(self, event):
-        for win in self.plot_windows:
-            win.close()
+        self.rep_window.close()                   # the only remaining separate window
         super().closeEvent(event)
 
 
