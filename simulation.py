@@ -1,16 +1,3 @@
-"""
-Employee attrition risk simulation (single agent, replacement-style).
-
-Each iteration (= 1 month):
-  1. Gaussian-copula Monte Carlo draws overtime, burnout, engagement, manager support
-  2. years_since_promotion += 1/12
-  3. A logistic regression turns the state into P(attrition)
-  4. A Bernoulli draw decides if the employee resigns; if so, count it and
-     replace them with a new employee at the initial state
-
-This module has no GUI code: app.py (PyQt6) and plots.py (matplotlib) build on it.
-run_scenarios() runs a list of Scenario objects with a shared years/seed.
-"""
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -256,14 +243,6 @@ def fresh_seed():
 
 def run_scenarios(df, corr, model, scenarios, n_steps=N_STEPS, seed=SEED):
     """Run every scenario with the same months and seed.
-
-    Each run_simulation call seeds its own RNG, so all scenarios see the same
-    underlying random draws (common random numbers): differences between them
-    are due to the scenario, and results do not depend on scenario order.
-
-    seed=None draws one fresh random seed for the whole batch, so the shared-draws
-    guarantee also holds for unseeded runs.
-
     Returns (results, errors): name -> SimulationResult, and name -> message
     for scenarios that failed. One failure does not stop the others."""
     names = [s.name for s in scenarios]
@@ -287,11 +266,6 @@ def run_scenarios(df, corr, model, scenarios, n_steps=N_STEPS, seed=SEED):
 def run_replications(df, corr, model, scenarios, n_runs=100, n_steps=N_STEPS,
                      base_seed=SEED, baseline=None, target=10.0):
     """Run every scenario n_runs times and compare each with the baseline.
-
-    Run r uses seed base_seed + r for ALL scenarios (same random draws within a
-    run, different draws between runs), so differences are due to the scenario.
-    baseline = name of the reference scenario (default: the first one).
-
     Returns (runs, table):
       runs  = one row per (run, scenario) with the two attrition measures
       table = one row per scenario: mean, sd, 95% CI of the mean, and the

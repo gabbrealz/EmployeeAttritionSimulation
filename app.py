@@ -1,19 +1,3 @@
-"""
-PyQt6 front-end for the employee attrition simulation: multi-scenario manager.
-
-    python app.py
-
-Main window: a scenario list (add / duplicate / remove), an editor for the
-selected scenario, shared run settings (months, seed) and a results table with
-one column per scenario. "Run All" simulates every scenario with the same
-months and seed. The main window has a Home tab (scenario management, run
-settings, the attrition model's evaluation metrics, results) and a
-Visualizations tab (the three graphs, one at a time, with a drop-down and
-Previous/Next buttons).
-
-This file contains no statistics: all maths lives in simulation.py, all
-drawing in plots.py.
-"""
 import sys
 
 # Import PyQt6 BEFORE the matplotlib Qt backend so matplotlib picks this binding.
@@ -435,9 +419,6 @@ class MainWindow(QMainWindow):
         scen_lay = QVBoxLayout(scen_box)
         self.list = QListWidget()
         self.list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        # A QListWidget asks for ~192 px by default, which can make this box taller than
-        # the run column and leave slack under its buttons. Ignoring that preferred
-        # height lets the run column set the row height; the list just fills what it gets.
         self.list.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
         scen_lay.addWidget(self.list, 1)
         btn_row = QHBoxLayout()
