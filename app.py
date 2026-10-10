@@ -7,8 +7,9 @@ Main window: a scenario list (add / duplicate / remove), an editor for the
 selected scenario, shared run settings (months, seed) and a results table with
 one column per scenario. "Run All" simulates every scenario with the same
 months and seed. The main window has a Home tab (scenario management, run
-settings, results) and a Visualizations tab (the three graphs, one at a time,
-with a drop-down and Previous/Next buttons).
+settings, the attrition model's evaluation metrics, results) and a
+Visualizations tab (the three graphs, one at a time, with a drop-down and
+Previous/Next buttons).
 
 This file contains no statistics: all maths lives in simulation.py, all
 drawing in plots.py.
@@ -18,18 +19,18 @@ import sys
 # Import PyQt6 BEFORE the matplotlib Qt backend so matplotlib picks this binding.
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGroupBox, QFormLayout, QCheckBox, QDoubleSpinBox, QSpinBox, QLabel, QComboBox,
     QPushButton, QMessageBox, QListWidget, QListWidgetItem, QLineEdit,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QGridLayout,
-    QTabWidget, QStackedWidget,
+    QTabWidget, QStackedWidget, QSizePolicy,
 )
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 
 from plots import plot_attrition, plot_predictors, plot_scatter
 from simulation import (
-    CSV_PATH, MC_VARS, N_STEPS, SEED, Scenario, default_scenarios, fresh_seed,
+    CSV_PATH, MC_VARS, N_STEPS, SEED, TEST_SIZE, Scenario, default_scenarios, fresh_seed,
     load_and_fit, run_replications, run_scenarios,
 )
 from PyQt6.QtGui import QColor
@@ -92,6 +93,16 @@ METRICS = [
 ] + [
     # effective shifts (after correlation propagation)
     (f"Shift: {LABELS[var][0].lower()}", _shift_cell(var)) for var in MC_VARS
+]
+
+# --- AI evaluation metrics (the attrition model's hold-out scores) -----------
+# (key in the dict returned by load_and_fit, caption, tooltip), in display order.
+MODEL_METRICS = [
+    ("accuracy", "Accuracy"),
+    ("precision", "Precision"),
+    ("recall", "Recall"),
+    ("f1", "F1 score"),
+    ("roc_auc", "ROC-AUC"),
 ]
 
 
@@ -251,9 +262,10 @@ class ShiftRow:
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, df, corr, model):
+    def __init__(self, df, corr, model, metrics):
         super().__init__()
         self.df, self.corr, self.model = df, corr, model
+        self.metrics = metrics       # the model's hold-out scores (fixed at fit time)
         self.setWindowTitle("Employee attrition simulation - scenarios")
 
         self.rows = {}               # variable -> ShiftRow (the editor)
@@ -292,17 +304,14 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ layout
     def _build_home(self):
-        """The Home tab: settings / scenarios / editor on top, results below."""
+        """The Home tab, top to bottom: settings / scenarios / editor, the AI
+        evaluation metrics, then the results. The first two are held at the height
+        of their content, so the results table gets all the spare window height."""
         page = QWidget()
         lay = QVBoxLayout(page)
-        split = QSplitter(Qt.Orientation.Vertical)
-        split.addWidget(self._build_top())
-        split.addWidget(self._build_results())
-        split.setChildrenCollapsible(False)
-        split.setStretchFactor(0, 1)
-        split.setStretchFactor(1, 2)
-        split.setSizes([320, 430])
-        lay.addWidget(split)
+        lay.addWidget(self._build_top())
+        lay.addWidget(self._build_model_metrics())
+        lay.addWidget(self._build_results(), 1)
         return page
 
     def _build_visualizations(self):
@@ -345,6 +354,9 @@ class MainWindow(QMainWindow):
 
     def _build_top(self):
         top = QWidget()
+        # Never taller than its content. The grid row is as tall as its tallest
+        # column (the run column), and the other two columns stretch to match it.
+        top.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         grid = QGridLayout(top)
         grid.setContentsMargins(0, 0, 0, 0)
         grid.addWidget(self._build_run_column(), 0, 0)
@@ -357,10 +369,12 @@ class MainWindow(QMainWindow):
 
     def _build_run_column(self):
         """Column 1: two group boxes, each with its own Run button INSIDE it.
-        The boxes share the column height equally (stretch 1 each) and nothing
-        is stretched below them, so the column ends flush with the Scenarios and
-        Scenario editor boxes beside it. Spare height goes to empty space at the
-        bottom of each box, the same way the Scenario editor handles it."""
+        The boxes take only the height their content needs (no stretch), so each
+        border sits snug against its fields and button. This column therefore sets
+        the height of the whole top row; the Scenarios and Scenario editor boxes
+        beside it stretch to match (see _build_scenarios). The addStretch() at the
+        bottom of each box only matters if the column is ever given extra height:
+        it keeps the contents packed at the top."""
         col = QWidget()
         lay = QVBoxLayout(col)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -389,7 +403,7 @@ class MainWindow(QMainWindow):
         self.run_btn = QPushButton("Run All")
         sim_lay.addWidget(self.run_btn)
         sim_lay.addStretch()                      # fields + button stay packed at the top of the box
-        lay.addWidget(sim_box, 1)
+        lay.addWidget(sim_box)                    # no stretch: the box wraps its content
 
         # --- Replication Settings: Replications, Target reduction, Run replications
         rep_box = QGroupBox("Replication Settings")
@@ -412,16 +426,20 @@ class MainWindow(QMainWindow):
                                 "FIRST scenario in the list (the baseline).")
         rep_lay.addWidget(self.rep_btn)
         rep_lay.addStretch()                      # fields + button stay packed at the top of the box
-        lay.addWidget(rep_box, 1)
+        lay.addWidget(rep_box)                    # no stretch: the box wraps its content
 
-        return col                                # no stretch below: the boxes fill the column
+        return col
 
     def _build_scenarios(self):
         scen_box = QGroupBox("Scenarios")
         scen_lay = QVBoxLayout(scen_box)
         self.list = QListWidget()
         self.list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        scen_lay.addWidget(self.list)
+        # A QListWidget asks for ~192 px by default, which can make this box taller than
+        # the run column and leave slack under its buttons. Ignoring that preferred
+        # height lets the run column set the row height; the list just fills what it gets.
+        self.list.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
+        scen_lay.addWidget(self.list, 1)
         btn_row = QHBoxLayout()
         self.add_btn = QPushButton("Add")
         self.dup_btn = QPushButton("Duplicate")
@@ -451,8 +469,29 @@ class MainWindow(QMainWindow):
         lay.addStretch()
         return self.editor_box
 
+    def _build_model_metrics(self):
+        """'AI Evaluation Metrics': how well the logistic regression predicts attrition
+        on its hold-out split, one caption + value per metric in a single row. The
+        scores are fixed when the model is fitted, so they are filled once here and
+        do not change on Run All."""
+        box = QGroupBox("AI Evaluation Metrics")
+        lay = QHBoxLayout(box)
+        for key, caption in MODEL_METRICS:
+            cell = QVBoxLayout()
+            cell.setSpacing(0)
+            name = QLabel(caption)
+            value = QLabel(_f3(self.metrics[key]))
+            value.setStyleSheet("font-size: 13pt; font-weight: bold;")
+            for label in (name, value):
+                label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                cell.addWidget(label)
+            lay.addLayout(cell, 1)                # equal width for every metric
+        # Exactly as tall as its content, like the top grid above it.
+        box.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        return box
+
     def _build_results(self):
-        box = QGroupBox("Results")
+        box = QGroupBox("Simulation Outputs")
         lay = QVBoxLayout(box)
         self.status_label = QLabel()
         lay.addWidget(self.status_label)
@@ -714,13 +753,12 @@ def main():
     install_excepthook()
     try:
         # The dataset never changes during a session: fit once, reuse on every run.
-        # load_and_fit also returns the model's hold-out metrics; the GUI doesn't show them.
-        df, corr, model, _metrics = load_and_fit()
+        df, corr, model, metrics = load_and_fit()
     except Exception as exc:        # missing file, missing columns, fit failure
         QMessageBox.critical(None, "Cannot load dataset", f"{CSV_PATH}\n\n{exc}")
         sys.exit(1)
 
-    win = MainWindow(df, corr, model)
+    win = MainWindow(df, corr, model, metrics)
     for sc in default_scenarios():            # baseline, heavy overtime, weak management
         win.add_scenario(sc)
     win.list.setCurrentRow(0)
