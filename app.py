@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QGroupBox, QFormLayout, QCheckBox, QDoubleSpinBox, QSpinBox, QLabel, QComboBox,
     QPushButton, QMessageBox, QListWidget, QListWidgetItem, QLineEdit,
-    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
+    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QGridLayout,
 )
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
@@ -30,7 +30,6 @@ from simulation import (
     CSV_PATH, MC_VARS, N_STEPS, SEED, Scenario, default_scenarios, fresh_seed,
     load_and_fit, run_replications, run_scenarios,
 )
-from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QColor
 
 LABELS = {  # variable -> (display name, spin-box suffix)
@@ -298,7 +297,6 @@ class MainWindow(QMainWindow):
         self.seed_check.toggled.connect(self.seed_spin.setEnabled)   # box only active when ticked
         self.seed_check.toggled.connect(self.mark_stale)             # a run setting changed
         self.run_btn.clicked.connect(self.on_run_all)
-        self.show_graphs_btn.clicked.connect(self.on_show_graphs)
         self.rep_btn.clicked.connect(self.on_run_replications)
 
         self.update_controls()
@@ -307,36 +305,24 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ layout
     def _build_top(self):
         top = QWidget()
-        lay = QHBoxLayout(top)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.addWidget(self._build_left_column())
-        lay.addWidget(self._build_editor(), stretch=1)
+        grid = QGridLayout(top)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.addWidget(self._build_run_column(), 0, 0)
+        grid.addWidget(self._build_scenarios(),  0, 1)
+        grid.addWidget(self._build_editor(),     0, 2)
+        for col, (stretch, min_w) in enumerate([(1, 250), (1, 240), (2, 340)]):
+            grid.setColumnStretch(col, stretch)
+            grid.setColumnMinimumWidth(col, min_w)
         return top
 
-    def _build_left_column(self):
+    def _build_run_column(self):
         col = QWidget()
-        col.setFixedWidth(300)
         lay = QVBoxLayout(col)
         lay.setContentsMargins(0, 0, 0, 0)
 
-        # Scenario list + Add / Duplicate / Remove
-        scen_box = QGroupBox("Scenarios")
-        scen_lay = QVBoxLayout(scen_box)
-        self.list = QListWidget()
-        self.list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        scen_lay.addWidget(self.list)
-        btn_row = QHBoxLayout()
-        self.add_btn = QPushButton("Add")
-        self.dup_btn = QPushButton("Duplicate")
-        self.remove_btn = QPushButton("Remove")
-        for b in (self.add_btn, self.dup_btn, self.remove_btn):
-            btn_row.addWidget(b)
-        scen_lay.addLayout(btn_row)
-        lay.addWidget(scen_box, stretch=1)
-
-        # Run settings: global to every scenario
-        run_box = QGroupBox("Run settings (all scenarios)")
-        run_form = QFormLayout(run_box)
+        # --- Simulation settings: Months, Fixed seed -------------------------
+        sim_box = QGroupBox("Simulation settings")
+        sim_form = QFormLayout(sim_box)
         self.steps_spin = QSpinBox()
         self.steps_spin.setRange(10, 100000)
         self.steps_spin.setValue(N_STEPS)
@@ -350,8 +336,16 @@ class MainWindow(QMainWindow):
         self.seed_check.setToolTip(
             "Ticked: every run uses this seed, so results are reproducible.\n"
             "Unticked: a new random seed is drawn on each Run All (shown in the status line).")
-        run_form.addRow("Months", self.steps_spin)
-        run_form.addRow(self.seed_check, self.seed_spin)
+        sim_form.addRow("Months", self.steps_spin)
+        sim_form.addRow(self.seed_check, self.seed_spin)
+        lay.addWidget(sim_box)
+
+        self.run_btn = QPushButton("Run All")
+        lay.addWidget(self.run_btn)
+
+        # --- Replication Settings: Replications, Target reduction -------------
+        rep_box = QGroupBox("Replication Settings")
+        rep_form = QFormLayout(rep_box)
         self.runs_spin = QSpinBox()
         self.runs_spin.setRange(2, 10000)
         self.runs_spin.setValue(100)
@@ -360,23 +354,32 @@ class MainWindow(QMainWindow):
         self.target_spin.setRange(0, 100)
         self.target_spin.setValue(10.0)
         self.target_spin.setSuffix(" %")
-        run_form.addRow("Replications", self.runs_spin)
-        run_form.addRow("Target reduction", self.target_spin)
-        lay.addWidget(run_box)
+        rep_form.addRow("Replications", self.runs_spin)
+        rep_form.addRow("Target reduction", self.target_spin)
+        lay.addWidget(rep_box)
 
-        # Run All + Show graphs
-        action_row = QHBoxLayout()
-        self.run_btn = QPushButton("Run All")
-        self.show_graphs_btn = QPushButton("Show graphs")
-        self.show_graphs_btn.setEnabled(False)    # nothing to show until the first run
-        action_row.addWidget(self.run_btn)
-        action_row.addWidget(self.show_graphs_btn)
-        lay.addLayout(action_row)
         self.rep_btn = QPushButton("Run replications")
         self.rep_btn.setToolTip("Runs every scenario many times and compares each with the "
                                 "FIRST scenario in the list (the baseline).")
         lay.addWidget(self.rep_btn)
+
+        lay.addStretch()                          # keep everything packed at the top
         return col
+
+    def _build_scenarios(self):
+        scen_box = QGroupBox("Scenarios")
+        scen_lay = QVBoxLayout(scen_box)
+        self.list = QListWidget()
+        self.list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        scen_lay.addWidget(self.list)
+        btn_row = QHBoxLayout()
+        self.add_btn = QPushButton("Add")
+        self.dup_btn = QPushButton("Duplicate")
+        self.remove_btn = QPushButton("Remove")
+        for b in (self.add_btn, self.dup_btn, self.remove_btn):
+            btn_row.addWidget(b)
+        scen_lay.addLayout(btn_row)
+        return scen_box
 
     def _build_editor(self):
         self.editor_box = QGroupBox("Scenario editor")
@@ -563,12 +566,6 @@ class MainWindow(QMainWindow):
                 win.show()
                 win.raise_()
 
-    def on_show_graphs(self):
-        """Reopen windows the user closed, without re-running."""
-        for win in self.plot_windows:
-            win.show()
-            win.raise_()
-
     # ---------------------------------------------------------------------- run
     def resolve_seed(self):
         """Return (seed, text for the status line) for this run. Unseeded = ONE fresh
@@ -602,7 +599,6 @@ class MainWindow(QMainWindow):
         self.last_results, self.last_shifts = results, pinned
         self.fill_results_table(results, pinned)
         self.draw_graphs({name: r.history for name, r in results.items()})
-        self.show_graphs_btn.setEnabled(True)
         failed = f", {len(errors)} failed" if errors else ""
         if not self.seed_check.isChecked():
             # Show the random seed in the (disabled) box: ticking "Fixed seed" afterwards
@@ -666,7 +662,7 @@ def main():
     for sc in default_scenarios():            # baseline, heavy overtime, weak management
         win.add_scenario(sc)
     win.list.setCurrentRow(0)
-    win.resize(1100, 750)
+    win.resize(1200, 750)
     win.show()
     QTimer.singleShot(0, win.on_run_all)      # run once so nothing is empty at launch
     sys.exit(app.exec())
