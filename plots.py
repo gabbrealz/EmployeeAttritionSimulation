@@ -1,22 +1,7 @@
-"""
-Plotting for the attrition simulation. No Qt imports, and no matplotlib.pyplot:
-every function receives a matplotlib Figure, clears it and redraws on it.
+import textwrap
 
-Both functions take `histories`: a dict mapping scenario name -> the `history`
-DataFrame returned by simulation.run_simulation (index = month; columns = the 5
-predictors, p_attrition, resigned). Insertion order = legend order.
-
-  * several scenarios: ROLLING MEANS only, one line per scenario (overlaying
-    several noisy raw series is unreadable; the shift between scenarios is the signal)
-  * one scenario: thin raw line + rolling mean, as a single-scenario detail view
-
-Each scenario gets the same color in every figure (by its position in `histories`).
-
-plot_scatter is different: it shows ONE scenario (chosen by name) as four scatterplots of
-the simulated states, with resignation months highlighted. There color means
-resigned / stayed, not scenario.
-"""
 from matplotlib.lines import Line2D
+from matplotlib.ticker import MaxNLocator
 
 from simulation import BOUNDS
 
@@ -57,8 +42,10 @@ def _smooth(series, n_steps):
     return series.rolling(max(1, n_steps // 20), min_periods=1).mean()
 
 
-def _legend(ax, histories):
-    ax.legend(ncol=min(len(histories), 4), fontsize="small", frameon=False)
+def _legend(ax, histories, **kwargs):
+    opts = dict(ncol=min(len(histories), 4), fontsize="small", frameon=False)
+    opts.update(kwargs)
+    ax.legend(**opts)
 
 
 def plot_predictors(fig, histories):
@@ -93,14 +80,46 @@ def plot_predictors(fig, histories):
     fig.suptitle(f"Predictor variables ({len(histories)} scenario/s)")
 
 
+def _bar_panel(ax, histories, colors, values, title, ylabel, fmt, integer=False):
+    """One bar per scenario, in the scenario's color, with the value written on top.
+    `values` maps scenario name -> number, in the same order as `histories`."""
+    names = list(histories)
+    bars = ax.bar(range(len(names)), [values[n] for n in names], width=0.6,
+                  color=[colors[n] for n in names])
+    ax.bar_label(bars, labels=[fmt.format(values[n]) for n in names],
+                 padding=2, fontsize="x-small")
+
+    # Long names ("stronger management") are wrapped onto two lines; with many
+    # scenarios they are rotated as well, so neighbouring labels never overlap.
+    many = len(names) > 6
+    ax.set_xticks(range(len(names)))
+    ax.set_xticklabels([textwrap.fill(n, 12) for n in names], fontsize="x-small",
+                       rotation=30 if many else 0, ha="right" if many else "center")
+    ax.set_xlim(-0.6, len(names) - 0.4)       # symmetric; a lone bar is not stretched wide
+    ax.set_ylim(0, max(values.values()) * 1.15 or 1.0)   # headroom for the value labels
+    if integer:
+        ax.yaxis.set_major_locator(MaxNLocator(integer=True))   # counts: no 2.5 resignations
+    ax.set_title(title, fontsize="medium")
+    ax.set_ylabel(ylabel, fontsize=LABEL_SIZE)
+    ax.grid(True, axis="y", alpha=0.25)
+    ax.set_axisbelow(True)                    # grid lines behind the bars
+
+
 def plot_attrition(fig, histories):
-    """2 stacked axes (shared x): cumulative resignations and monthly P(attrition)."""
+    """2x2 grid.
+    Left column (shared x): cumulative resignations and monthly P(attrition) over time.
+    Right column: total resignations per scenario and mean P(attrition) per scenario."""
     fig.clear()
     if not histories:
         return
     colors = _colors(histories)
     single = len(histories) == 1
-    ax_cum, ax_p = fig.subplots(2, 1, sharex=True)
+
+    gs = fig.add_gridspec(2, 2, width_ratios=[3, 2])
+    ax_cum = fig.add_subplot(gs[0, 0])
+    ax_p = fig.add_subplot(gs[1, 0], sharex=ax_cum)
+    ax_total = fig.add_subplot(gs[0, 1])
+    ax_avg = fig.add_subplot(gs[1, 1])
 
     for name, h in histories.items():
         c = colors[name]
@@ -120,15 +139,25 @@ def plot_attrition(fig, histories):
             ax_p.plot(left, [0] * len(left), ls="none", marker="|", ms=9, color="red",
                       transform=ax_p.get_xaxis_transform(), clip_on=False)
 
-    ax_cum.set_ylim(bottom=0)
+    ax_cum.set_ylim(0, max(1, ax_cum.get_ylim()[1]))     # a run with no resignations still gets a 0-1 axis
+    ax_cum.yaxis.set_major_locator(MaxNLocator(integer=True))
     ax_cum.set_ylabel("Cumulative attrition", fontsize=LABEL_SIZE)
     ax_cum.grid(True, alpha=0.25)
-    _legend(ax_cum, histories)
+    _legend(ax_cum, histories, ncol=1 if len(histories) <= 5 else 2)
 
     ax_p.set_ylim(bottom=0)
     ax_p.set_ylabel("Attrition probability", fontsize=LABEL_SIZE)
     ax_p.set_xlabel("Month")
     ax_p.grid(True, alpha=0.25)
+
+    # Right column: one number per scenario, over the WHOLE run. These are the same
+    # figures as "Employee attrition" and "Avg. attrition probability" in the results table.
+    total = {n: int(h["resigned"].sum()) for n, h in histories.items()}
+    avg_p = {n: float(h["p_attrition"].mean()) for n, h in histories.items()}
+    _bar_panel(ax_total, histories, colors, total,
+               "Total attrition per scenario", "Attrition", "{:d}", integer=True)
+    _bar_panel(ax_avg, histories, colors, avg_p,
+               "Average attrition probability per scenario", "Avg. attrition probability", "{:.3f}")
 
     fig.suptitle(f"Attrition ({len(histories)} scenario/s)")
 
