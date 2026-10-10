@@ -16,9 +16,13 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import statsmodels.api as sm
 from scipy.stats import norm
 from scipy.special import expit          # logistic function: 1 / (1 + e^-x)
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import (
+    accuracy_score, f1_score, precision_score, recall_score, roc_auc_score,
+)
+from sklearn.model_selection import train_test_split
 
 # ----------------------------------------------------------------------------
 # Configuration
@@ -27,6 +31,7 @@ from scipy.special import expit          # logistic function: 1 / (1 + e^-x)
 CSV_PATH = Path(__file__).with_name("dataset.csv")   # columns = the state variable names
 N_STEPS = 12*10     # 10 years
 SEED = 42
+TEST_SIZE = 0.2     # share of the dataset held out to evaluate the attrition model
 
 # Initial state of every new employee. Only years_since_promotion is actually
 # needed by the loop: the other four are redrawn by Monte Carlo every step.
@@ -127,18 +132,46 @@ def sample_mc(df, corr, shifts, n_steps, rng):
 
 
 # ----------------------------------------------------------------------------
-# 3. Predictive attrition model (logistic regression from statsmodels)
+# 3. Predictive attrition model (scikit-learn LogisticRegression)
 # ----------------------------------------------------------------------------
-def fit_attrition_model(df):
-    X = sm.add_constant(df[FEATURES])          # adds the intercept column "const"
-    return sm.Logit(df["attrition"], X).fit(disp=0)
+def _new_model():
+    """An unfitted logistic regression that matches the plain maximum-likelihood fit.
+
+    sklearn's default (C=1, L2 penalty) shrinks the coefficients a little (more on
+    small datasets), so the model would no longer be the unpenalised fit this
+    simulation was built on. C=1e10 switches the penalty off for practical purposes
+    (np.inf would do the same, but sklearn 1.8 prints a spurious warning for it).
+    tol=1e-8 makes the solver converge to the exact optimum; the default 1e-4 stops
+    short of it on these unscaled features."""
+    return LogisticRegression(C=1e10, tol=1e-8, max_iter=1000)
+
+
+def fit_attrition_model(df, test_size=TEST_SIZE, seed=SEED):
+    X, y = df[FEATURES], df["attrition"]
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=seed, stratify=y)
+
+    held_out = _new_model().fit(X_train, y_train)
+    y_pred = held_out.predict(X_test)                        # class labels
+    y_prob = held_out.predict_proba(X_test)[:, 1]            # P(attrition = 1)
+    metrics = {
+        "accuracy": accuracy_score(y_test, y_pred),
+        "precision": precision_score(y_test, y_pred, zero_division=0),   # 0 if no one is predicted to resign
+        "recall": recall_score(y_test, y_pred, zero_division=0),
+        "f1": f1_score(y_test, y_pred, zero_division=0),
+        "roc_auc": roc_auc_score(y_test, y_prob),
+    }
+    metrics = {name: float(value) for name, value in metrics.items()}   # plain floats, not numpy scalars
+
+    model = _new_model().fit(X, y)
+    return model, metrics
 
 
 def load_and_fit(csv_path=CSV_PATH):
     """Read the dataset and fit everything that does not change between runs.
-    Used by both the CLI (below) and the GUI. Returns (df, corr, model)."""
+    Used by both the CLI (below) and the GUI. Returns (df, corr, model, metrics)."""
     df = pd.read_csv(csv_path)[FEATURES + ["attrition"]].dropna()
-    return df, fit_copula_correlation(df), fit_attrition_model(df)
+    model, metrics = fit_attrition_model(df)
+    return df, fit_copula_correlation(df), model, metrics
 
 
 # ----------------------------------------------------------------------------
@@ -156,8 +189,8 @@ def run_simulation(df, corr, model, shifts, n_steps=N_STEPS, seed=SEED):
     draws = sample_mc(df, corr, full_shifts, n_steps, rng)
     mc_values = draws.to_numpy()                      # columns follow MC_VARS
 
-    intercept = model.params["const"]
-    coefs = model.params[FEATURES].to_numpy()         # same order as FEATURES
+    intercept = model.intercept_[0]
+    coefs = model.coef_[0]                            # same order as FEATURES
 
     years = INITIAL_STATE["years_since_promotion"]
     years_log = np.empty(n_steps)
@@ -301,8 +334,9 @@ def run_replications(df, corr, model, scenarios, n_runs=100, n_steps=N_STEPS,
 # Main: fit everything from the dataset, then run each scenario
 # ----------------------------------------------------------------------------
 if __name__ == "__main__":
-    df, corr, model = load_and_fit()
-    print(model.summary(), "\n")
+    df, corr, model, metrics = load_and_fit()
+    print(f"Attrition model, hold-out metrics ({1 - TEST_SIZE:.0%} train / {TEST_SIZE:.0%} test):")
+    print(pd.Series(metrics).round(3).to_string(), "\n")
 
     results, errors = run_scenarios(df, corr, model, default_scenarios())
     print(pd.DataFrame({name: r.summary for name, r in results.items()}).T.round(2))

@@ -714,7 +714,8 @@ def main():
     install_excepthook()
     try:
         # The dataset never changes during a session: fit once, reuse on every run.
-        df, corr, model = load_and_fit()
+        # load_and_fit also returns the model's hold-out metrics; the GUI doesn't show them.
+        df, corr, model, _metrics = load_and_fit()
     except Exception as exc:        # missing file, missing columns, fit failure
         QMessageBox.critical(None, "Cannot load dataset", f"{CSV_PATH}\n\n{exc}")
         sys.exit(1)
