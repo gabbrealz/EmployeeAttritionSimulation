@@ -73,6 +73,7 @@ METRICS = [
     ("Avg. engagement score",            _summary_cell("avg_employee_engagement", _f2)),
     ("Avg. manager support score",       _summary_cell("avg_manager_support", _f2)),
     ("Avg. years since promotion",       _summary_cell("avg_years_since_promotion", _f2)),
+    ("Avg. years at resignation",        _summary_cell("avg_years_at_resignation", _f2)),
     ("Time elapsed (months)",            _summary_cell("time_elapsed", _int)),
 ] + [
     # effective shifts (after correlation propagation)
@@ -165,7 +166,7 @@ class ScatterPanel(PlotPanel):
 class ReplicationWindow(QWidget):
     """Standalone window: the n-run comparison, one row per scenario."""
     COLUMNS = ["Scenario", "Avg. resignations", "± 95% CI", "Avg. attrition prob.",
-               "Reduction vs baseline", "Meets target"]
+               "Avg. years at resignation", "Reduction vs baseline", "Meets target"]
 
     def __init__(self, parent=None):
         super().__init__(parent, Qt.WindowType.Window)
@@ -201,12 +202,14 @@ class ReplicationWindow(QWidget):
                 f"{table.loc[name, ('avg_attrition_probability', 'mean')]:.4f}",
                 "-" if is_base else f"{red:+.1f}%",
                 "-" if is_base else ("Yes" if meets else "No"),
+                f"{table.loc[name, ('avg_years_at_resignation', 'mean')]:.2f}"
             ]
             for c, text in enumerate(cells):
                 item = QTableWidgetItem(text)
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if meets:
                     item.setBackground(QColor("#d9ead3"))   # light green = target met
+                    item.setForeground(QColor("#000000"))   # dark text: readable in light and dark mode
                 self.table.setItem(r, c, item)
 
 

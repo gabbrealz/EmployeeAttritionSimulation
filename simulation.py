@@ -184,6 +184,7 @@ def run_simulation(df, corr, model, shifts, n_steps=N_STEPS, seed=SEED):
     p_log = np.empty(n_steps)                         # P(attrition) each month
     resigned_log = np.zeros(n_steps, dtype=int)       # 1 = resigned that month
     employee_attrition = 0
+    years_at_resignation = []                         # years since promotion at each resignation
 
     for t in range(n_steps):
         years += 1/12                                 # deterministic update
@@ -196,6 +197,7 @@ def run_simulation(df, corr, model, shifts, n_steps=N_STEPS, seed=SEED):
         if rng.random() < p:                          # random experiment
             resigned_log[t] = 1
             employee_attrition += 1
+            years_at_resignation.append(years)
             years = INITIAL_STATE["years_since_promotion"]   # new employee
 
     # Per-month history for plotting (index = month 1..n_steps)
@@ -217,6 +219,8 @@ def run_simulation(df, corr, model, shifts, n_steps=N_STEPS, seed=SEED):
         # extensions (not in the original spec's output list)
         "turnover_rate": employee_attrition / n_steps,
         "avg_attrition_probability": p_log.mean(),
+        "avg_years_at_resignation": (float(np.mean(years_at_resignation))
+                                     if years_at_resignation else float("nan")),
     }
     return SimulationResult(summary, history, {k: float(v) for k, v in full_shifts.items()})
 
@@ -285,6 +289,7 @@ def run_replications(df, corr, model, scenarios, n_runs=100, n_steps=N_STEPS,
                 "scenario": name,
                 "employee_attrition": res.summary["employee_attrition"],
                 "avg_attrition_probability": res.summary["avg_attrition_probability"],
+                "avg_years_at_resignation": res.summary["avg_years_at_resignation"],
             })
     runs = pd.DataFrame(rows)
 
@@ -298,6 +303,9 @@ def run_replications(df, corr, model, scenarios, n_runs=100, n_steps=N_STEPS,
         table[(metric, "ci95")] = 1.96 * sd / np.sqrt(n_runs)
         table[(metric, "reduction_%")] = (1 - mean / mean[baseline]) * 100
     table = pd.DataFrame(table)
+
+    table[("avg_years_at_resignation", "mean")] = (
+        runs.groupby("scenario")["avg_years_at_resignation"].mean().reindex(names))
 
     # Does the scenario meet the target on the main measure?
     table[("meets_target", f">={target:g}%")] = (
