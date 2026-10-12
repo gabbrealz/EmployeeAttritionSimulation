@@ -7,9 +7,9 @@ from scipy.stats import norm
 from scipy.special import expit, ndtr, ndtri   # logistic 1/(1+e^-x); normal CDF; normal inverse CDF
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
-    accuracy_score, f1_score, precision_score, recall_score, roc_auc_score,
+    accuracy_score, f1_score, precision_recall_curve, precision_score, recall_score, roc_auc_score,
 )
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import cross_val_predict, train_test_split
 
 # ----------------------------------------------------------------------------
 # Configuration
@@ -152,19 +152,31 @@ def _new_model():
     return LogisticRegression(C=1e10, tol=1e-8, max_iter=1000)
 
 
+def _best_threshold(y_true, y_prob):
+    """Probability cut-off that maximises F1 (found on training data only)."""
+    prec, rec, thr = precision_recall_curve(y_true, y_prob)
+    f1 = 2 * prec[:-1] * rec[:-1] / np.maximum(prec[:-1] + rec[:-1], 1e-12)
+    return float(thr[np.argmax(f1)])
+
+
 def fit_attrition_model(df, test_size=TEST_SIZE, seed=SEED):
+    """Fits the logistic regression and scores it on a hold-out split."""
     X, y = df[FEATURES], df["attrition"]
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=seed, stratify=y)
 
+    cv_prob = cross_val_predict(_new_model(), X_train, y_train, cv=5, method="predict_proba")[:, 1]
+    threshold = _best_threshold(y_train, cv_prob)
+
     held_out = _new_model().fit(X_train, y_train)
-    y_pred = held_out.predict(X_test)                        # class labels
     y_prob = held_out.predict_proba(X_test)[:, 1]            # P(attrition = 1)
+    y_pred = (y_prob >= threshold).astype(int)               # class labels at the tuned cut-off
     metrics = {
         "accuracy": accuracy_score(y_test, y_pred),
-        "precision": precision_score(y_test, y_pred, zero_division=0),   # 0 if no one is predicted to resign
+        "precision": precision_score(y_test, y_pred, zero_division=0),
         "recall": recall_score(y_test, y_pred, zero_division=0),
         "f1": f1_score(y_test, y_pred, zero_division=0),
         "roc_auc": roc_auc_score(y_test, y_prob),
+        "threshold": threshold,
     }
     metrics = {name: float(value) for name, value in metrics.items()}   # plain floats, not numpy scalars
 

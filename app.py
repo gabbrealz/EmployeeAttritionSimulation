@@ -73,7 +73,7 @@ METRICS = [
     ("Avg. engagement score",            _summary_cell("avg_employee_engagement", _f2)),
     ("Avg. manager support score",       _summary_cell("avg_manager_support", _f2)),
     ("Avg. years since promotion",       _summary_cell("avg_years_since_promotion", _f2)),
-    ("Avg. years at resignation",        _summary_cell("avg_years_at_resignation", _f2)),
+    ("Avg. years since promotion at resignation",        _summary_cell("avg_years_at_resignation", _f2)),
     ("Time elapsed (months)",            _summary_cell("time_elapsed", _int)),
 ] + [
     # effective shifts (after correlation propagation)
