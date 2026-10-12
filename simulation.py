@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from scipy.stats import norm
-from scipy.special import expit          # logistic function: 1 / (1 + e^-x)
+from scipy.special import expit, ndtr, ndtri   # logistic 1/(1+e^-x); normal CDF; normal inverse CDF
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     accuracy_score, f1_score, precision_score, recall_score, roc_auc_score,
@@ -68,10 +68,11 @@ class SimulationResult:
 # 1. Fit the Gaussian copula (dependence between the 4 Monte Carlo variables)
 # ----------------------------------------------------------------------------
 def fit_copula_correlation(df):
-    """Correlation matrix of the 'normal scores' of each variable's ranks."""
-    u = df[MC_VARS].rank() / (len(df) + 1)     # ranks -> uniform values (between 0 and 1)
+    """5x5 correlation matrix of the 'normal scores' of each variable's ranks.
+    Order = FEATURES: the 4 Monte Carlo variables first, years_since_promotion last."""
+    u = df[FEATURES].rank() / (len(df) + 1)    # ranks -> uniform values (between 0 and 1)
     z = norm.ppf(u)                            # uniform -> standard normal scores
-    return np.corrcoef(z, rowvar=False)        # 4x4 correlation matrix
+    return np.corrcoef(z, rowvar=False)        # 5x5 correlation matrix
 
 
 # ----------------------------------------------------------------------------
@@ -87,7 +88,8 @@ def propagate_shifts(df, corr, shifts):
 
     sd = df[MC_VARS].std().to_numpy()
 
-    cov = corr * np.outer(sd, sd)                       # correlation -> covariance
+    n = len(MC_VARS)
+    cov = corr[:n, :n] * np.outer(sd, sd)               # 4x4 block of the copula correlation -> covariance
     S = [MC_VARS.index(v) for v in shifts]              # shifted variable indices
 
     delta = np.array(list(shifts.values()))
@@ -96,27 +98,44 @@ def propagate_shifts(df, corr, shifts):
     return dict(zip(MC_VARS, full))
 
 
-def sample_mc(df, corr, shifts, n_steps, rng):
-    """Draw n_steps rows of the 4 Monte Carlo variables, with scenario shifts."""
-    # Correlated normals -> uniforms: this is the copula step
-    z = rng.multivariate_normal(np.zeros(len(MC_VARS)), corr, size=n_steps)
-    u = norm.cdf(z)
+def _marginals(df):
+    """Per Monte Carlo variable: its sorted dataset values and the quantile method.
+    "inverted_cdf" keeps discrete scales (<=15 distinct values) as real observed
+    values instead of interpolating between them."""
+    return [(np.sort(df[v].to_numpy()), "inverted_cdf" if df[v].nunique() <= 15 else "linear")
+            for v in MC_VARS]
 
-    draws = {}
-    for i, var in enumerate(MC_VARS):
-        data = df[var].to_numpy()
-        # Marginal = the dataset's own distribution (inverse empirical CDF).
-        # "inverted_cdf" keeps discrete scales (<=15 distinct values) as real
-        # observed values instead of interpolating between them.
-        method = "inverted_cdf" if df[var].nunique() <= 15 else "linear"
-        x = np.quantile(data, u[:, i], method=method)
 
-        x = x + shifts.get(var, 0.0)                          # scenario shift
-        lo, hi = BOUNDS.get(var, (data.min(), data.max()))    # keep in valid range
-        draws[var] = np.clip(x, lo, hi)
+def _quantile(sorted_data, u, method):
+    """Inverse empirical CDF of one uniform u (same result as np.quantile, but fast per step)."""
+    n = len(sorted_data)
+    if method == "inverted_cdf":
+        return sorted_data[min(max(int(np.ceil(u * n)) - 1, 0), n - 1)]
+    pos = u * (n - 1)
+    lo = int(pos)
+    hi = min(lo + 1, n - 1)
+    return sorted_data[lo] + (pos - lo) * (sorted_data[hi] - sorted_data[lo])
 
-    return pd.DataFrame(draws)
 
+def _years_cdf(df):
+    """Empirical CDF of years_since_promotion as (values, uniforms), using the same
+    average-rank / (n + 1) convention as fit_copula_correlation, so a value of the
+    simulated 'years' maps to the normal score the copula was fitted on."""
+    col = df["years_since_promotion"].to_numpy()
+    vals, counts = np.unique(col, return_counts=True)
+    below = np.cumsum(counts) - counts
+    return vals, (below + (counts + 1) / 2) / (len(col) + 1)
+
+
+def _conditional_gaussian(corr):
+    """Gaussian conditioning of the 4 Monte Carlo variables on years_since_promotion.
+    With normal scores z (unit variance), given the years score z_y:
+        z_mc | z_y  ~  N(r * z_y,  R_mc - r r')      r = corr of each MC variable with years
+    Returns (r, L) with L the Cholesky factor of the conditional covariance."""
+    n = len(MC_VARS)
+    r = corr[:n, n]
+    L = np.linalg.cholesky(corr[:n, :n] - np.outer(r, r))
+    return r, L
 
 # ----------------------------------------------------------------------------
 # 3. Predictive attrition model (scikit-learn LogisticRegression)
@@ -171,24 +190,42 @@ def run_simulation(df, corr, model, shifts, n_steps=N_STEPS, seed=SEED):
 
     rng = np.random.default_rng(seed)   # same seed per scenario -> fair comparison
 
-    # Monte Carlo draws don't depend on who resigns, so draw every step up front
     full_shifts = propagate_shifts(df, corr, shifts)
-    draws = sample_mc(df, corr, full_shifts, n_steps, rng)
-    mc_values = draws.to_numpy()                      # columns follow MC_VARS
+    shift_vec = np.array([full_shifts[v] for v in MC_VARS])
+    marginals = _marginals(df)
+    bounds = []
+    for v in MC_VARS:
+        lo, hi = BOUNDS.get(v, (df[v].min(), df[v].max()))
+        bounds.append((-np.inf if lo is None else lo, np.inf if hi is None else hi))
+    y_vals, y_u = _years_cdf(df)
+    r, L = _conditional_gaussian(corr)
+
+    # The random numbers behind the Monte Carlo draws are generated up front, so every
+    # scenario with the same seed sees the same ones. The variables themselves are
+    # built inside the loop, because their distribution depends on the current
+    # years_since_promotion (which resets whenever the employee is replaced).
+    e = rng.standard_normal((n_steps, len(MC_VARS)))
 
     intercept = model.intercept_[0]
     coefs = model.coef_[0]                            # same order as FEATURES
 
     years = INITIAL_STATE["years_since_promotion"]
+    mc_values = np.empty((n_steps, len(MC_VARS)))
     years_log = np.empty(n_steps)
     p_log = np.empty(n_steps)                         # P(attrition) each month
     resigned_log = np.zeros(n_steps, dtype=int)       # 1 = resigned that month
-    employee_attrition = 0
     years_at_resignation = []                         # years since promotion at each resignation
+    employee_attrition = 0
 
     for t in range(n_steps):
         years += 1/12                                 # deterministic update
         years_log[t] = years                          # state the model sees
+
+        z_years = ndtri(np.interp(years, y_vals, y_u))
+        u = ndtr(r * z_years + L @ e[t])
+        for i, (data, method) in enumerate(marginals):
+            x = _quantile(data, u[i], method) + shift_vec[i]           # scenario shift
+            mc_values[t, i] = min(max(x, bounds[i][0]), bounds[i][1])  # keep in valid range
 
         x = np.append(mc_values[t], years)            # full state, FEATURES order
         p = expit(intercept + coefs @ x)              # P(attrition)
@@ -197,8 +234,10 @@ def run_simulation(df, corr, model, shifts, n_steps=N_STEPS, seed=SEED):
         if rng.random() < p:                          # random experiment
             resigned_log[t] = 1
             employee_attrition += 1
-            years_at_resignation.append(years)
+            years_at_resignation.append(years)        # record BEFORE the reset
             years = INITIAL_STATE["years_since_promotion"]   # new employee
+
+    draws = pd.DataFrame(mc_values, columns=MC_VARS)
 
     # Per-month history for plotting (index = month 1..n_steps)
     history = draws.copy()
@@ -223,7 +262,6 @@ def run_simulation(df, corr, model, shifts, n_steps=N_STEPS, seed=SEED):
                                      if years_at_resignation else float("nan")),
     }
     return SimulationResult(summary, history, {k: float(v) for k, v in full_shifts.items()})
-
 
 # ----------------------------------------------------------------------------
 # 5. Scenario layer (several scenarios, one shared n_steps/seed)
