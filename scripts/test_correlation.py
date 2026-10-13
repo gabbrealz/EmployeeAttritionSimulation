@@ -19,6 +19,7 @@ MC_VARS = [
     "burnout_score",
     "engagement_score",
     "manager_support_score",
+    "years_since_promotion"
 ]
 
 
