@@ -200,9 +200,9 @@ class ReplicationWindow(QWidget):
                 f"{table.loc[name, ('employee_attrition', 'mean')]:.1f}",
                 f"±{table.loc[name, ('employee_attrition', 'ci95')]:.1f}",
                 f"{table.loc[name, ('avg_attrition_probability', 'mean')]:.4f}",
+                f"{table.loc[name, ('avg_years_at_resignation', 'mean')]:.2f}",
                 "-" if is_base else f"{red:+.1f}%",
                 "-" if is_base else ("Yes" if meets else "No"),
-                f"{table.loc[name, ('avg_years_at_resignation', 'mean')]:.2f}"
             ]
             for c, text in enumerate(cells):
                 item = QTableWidgetItem(text)
